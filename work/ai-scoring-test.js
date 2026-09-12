@@ -1,80 +1,67 @@
-// 五子棋 AI 评分 + 深度教学点评回归测试：直接从 gomoku.html 提取函数运行，避免代码漂移。
-'use strict';
+// ============================================================
+// 加载方式（2026-xx 迁移）：直接 require 引擎模块，不再从 gomoku.html 正则抠函数。
+// 引擎是唯一权威实现：outputs/engine/gomoku-ai.js（由 work/build-engine.js 生成）。
+// 好处：重构 HTML 不会让测试失效；改引擎立刻被测到。
+// ============================================================
+const path = require('path');
 const fs = require('fs');
-const src = fs.readFileSync('outputs/gomoku.html', 'utf8');
-
-function extractFn(name) {
-  const start = src.indexOf('function ' + name + '(');
-  if (start < 0) throw new Error('未找到函数 ' + name);
-  const brace = src.indexOf('{', src.indexOf(')', start));
-  let depth = 0, i = brace;
-  for (; i < src.length; i++) {
-    const ch = src[i];
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) break; }
-  }
-  return src.slice(start, i + 1);
-}
-
-const fns = ['inBoard', 'lineInfo', 'lineScore', 'directionScore', 'evaluateCell', 'threatLevel',
-             'canWinNow', 'findImmediateWin', 'scoreFor', 'resolveThreats', 'bestByScore',
-             'getCandidateMoves', 'evaluateBoard', 'comboBonus', 'countThreats', 'threatSpaceBonus',
-             'minimax', 'bestBySearch', 'searchDepth', 'forcingMovesOf', 'findVcfWin', 'vcfSearch', 'vcfForcingMoves',
-             'vcfBlockPoints', 'findVctWin', 'vctSearch', 'vctForcingMoves', 'vctBlockPoints', 'vctDefense', 'findDoubleThreat', 'openingMove', 'getBestMove',
-             'analyzePoint', 'analyzePlayerMove', 'playerDoubleThreatComment', 'weakMoveReason',
-             'eduRecommendLevel', 'patternText', 'colToLabel', 'formatPos', 'colorName',
-             'findOpponentDoubleThreat', 'pickVaried', 'pickTopN', 'analyzeOpponentIntent', 'estimateWinRate',
-             'initSearchTables', 'hashXor', 'ttStore', 'findDoubleKill', 'bookMove'];
-const body = fns.map(extractFn).join('\n');
-const api = new Function(
-  'boardSize', 'board', 'EMPTY', 'BLACK', 'WHITE', 'AI_COLOR', 'DIRECTIONS', 'LIVE_THREE_SCORE',
-  'HINT_RADIUS', 'WIN_SCORE', 'SEARCH_DEPTH', 'CANDIDATE_LIMIT', 'ROOT_CANDIDATE_LIMIT', 'SEARCH_BUDGET_MS', 'MEDIUM_SEARCH_DEPTH', 'MEDIUM_SEARCH_BUDGET_MS',
-  'VCF_MAX_PLIES', 'VCF_NODE_LIMIT', 'VCF_TIME_BUDGET_MS', 'VCT_MAX_PLIES', 'VCT_NODE_LIMIT', 'VCT_TIME_BUDGET_MS',
-  'OPENING_TOTAL_MOVES', 'OPENING_DOUBLE_BONUS', 'CONNECT_BONUS', 'CENTER_WEIGHT', 'DOUBLE_THREAT_BONUS', 'TEMPO_BONUS',
-  'LEVEL_EASY', 'LEVEL_MEDIUM', 'LEVEL_HARD', 'playerColor', 'aiColor', 'aiLevel', 'moveVariety', 'searchState', 'lastVcfPath', 'lastVctPath', 'performance', 'WIN_RATE_SCALE', 'WIN_RATE_COMBO_WEIGHT',
-  'TT_MAX_ENTRIES', 'TT_EXACT', 'TT_LOWER', 'TT_UPPER', 'TT_SIDE_ME', 'TT_SIDE_OPP', 'TT_PERSP_BLACK', 'TT_PERSP_WHITE', 'OPENING_BOOK', 'OPENING_BOOK_MAX_STONES', 'PATTERN_TABLE',
-  'let ttMap=null;let ttZobrist=null;let boardHash=0;let historyTable=null;let killerTable=null;\n' + body + ';\nreturn {lineInfo,lineScore,directionScore,evaluateCell,canWinNow,findImmediateWin,' +
-  'getBestMove,analyzePoint,analyzePlayerMove,playerDoubleThreatComment,weakMoveReason,patternText,formatPos,analyzeOpponentIntent,estimateWinRate};');
-
 const S = 19;
-const EMPTY = 0, BLACK = 1, WHITE = 2, AI_COLOR = WHITE;
-const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
-const LIVE_THREE_SCORE = 10000;
-const HINT_RADIUS = 2;
-const WIN_SCORE = 100000000;
-const SEARCH_DEPTH = 3, CANDIDATE_LIMIT = 16, ROOT_CANDIDATE_LIMIT = 18, SEARCH_BUDGET_MS = 2500;
-const MEDIUM_SEARCH_DEPTH = 3, MEDIUM_SEARCH_BUDGET_MS = 600;
-const VCF_MAX_PLIES = 10, VCF_NODE_LIMIT = 5000, VCF_TIME_BUDGET_MS = 250;
-const VCT_MAX_PLIES = 10, VCT_NODE_LIMIT = 5000, VCT_TIME_BUDGET_MS = 300;
-const OPENING_TOTAL_MOVES = 8, OPENING_DOUBLE_BONUS = 20000;
-const CONNECT_BONUS = 30, CENTER_WEIGHT = 25, DOUBLE_THREAT_BONUS = 30000, TEMPO_BONUS = 1500;
-const WIN_RATE_SCALE = 40000;
-const WIN_RATE_COMBO_WEIGHT = 0.25;
-const TT_MAX_ENTRIES = 300000, TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2, TT_SIDE_ME = 0x9E3779B9, TT_SIDE_OPP = 0x85EBCA77;
-const TT_PERSP_BLACK = 0x6D2B79F5, TT_PERSP_WHITE = 0x1B56C4E9;
-const OPENING_BOOK = JSON.parse(fs.readFileSync('work/opening-book.json', 'utf8'));
-const OPENING_BOOK_MAX_STONES = 8;
-const PATTERN_TABLE = [[0,0,0],[10,10,100],[100,100,1000],[1000,1000,10000],[10000,10000,100000],[1000000,1000000,1000000]];
-const LEVEL_EASY = 'easy', LEVEL_MEDIUM = 'medium', LEVEL_HARD = 'hard';
-let aiLevel = LEVEL_MEDIUM;
-let playerColor = BLACK;   // 与页面一致：默认玩家执黑
-let aiColor = WHITE;       // 与页面一致：默认 AI 执白
-let moveVariety = 0;       // 测试固定为 0：关闭随机，保证断言确定
-let searchState = null;
-let lastVcfPath = null;
-let lastVctPath = null;
-const performance = { now: () => Date.now() };
 
-const board = Array.from({ length: S }, () => Array(S).fill(EMPTY));
+/* 统一测试入口：引擎能力来自 require 的引擎模块，
+ * 页面侧教学能力（analyzePoint / estimateWinRate …）由 harness 从 HTML 提取。 */
+const { A, AI } = require(path.join(__dirname, '_test-harness.js'));
+const {
+  EMPTY, BLACK, WHITE, DIRECTIONS, LEVEL_EASY, LEVEL_MEDIUM, LEVEL_HARD,
+} = AI;
+const AI_COLOR = A.WHITE;
+const LIVE_THREE_SCORE = A.LIVE_THREE_SCORE;
+const HINT_RADIUS = A.HINT_RADIUS;
+const WIN_SCORE = A.WIN_SCORE;
+const PATTERN_TABLE = A.PATTERN_TABLE;
+/* 开局库：可读副本，仅供“库内应答必须合法”这类断言参考 */
+const OPENING_BOOK = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'outputs', 'engine', 'opening-book.json'), 'utf8'));
+/* 以下常量在断言体里被直接引用（原先由 api() 形参注入），现在从引擎取 */
+const SEARCH_DEPTH = A.SEARCH_DEPTH;
+const CANDIDATE_LIMIT = A.CANDIDATE_LIMIT;
+const ROOT_CANDIDATE_LIMIT = A.ROOT_CANDIDATE_LIMIT;
+const SEARCH_BUDGET_MS = A.SEARCH_BUDGET_MS;
+const MEDIUM_SEARCH_DEPTH = A.MEDIUM_SEARCH_DEPTH;
+const MEDIUM_SEARCH_BUDGET_MS = A.MEDIUM_SEARCH_BUDGET_MS;
+const VCF_MAX_PLIES = A.VCF_MAX_PLIES;
+const VCF_NODE_LIMIT = A.VCF_NODE_LIMIT;
+const VCF_TIME_BUDGET_MS = A.VCF_TIME_BUDGET_MS;
+const VCT_MAX_PLIES = A.VCT_MAX_PLIES;
+const VCT_NODE_LIMIT = A.VCT_NODE_LIMIT;
+const VCT_TIME_BUDGET_MS = A.VCT_TIME_BUDGET_MS;
+const OPENING_TOTAL_MOVES = A.OPENING_TOTAL_MOVES;
+const OPENING_DOUBLE_BONUS = A.OPENING_DOUBLE_BONUS;
+const OPENING_BOOK_MAX_STONES = A.OPENING_BOOK_MAX_STONES;
+const CONNECT_BONUS = A.CONNECT_BONUS;
+const CENTER_WEIGHT = A.CENTER_WEIGHT;
+const DOUBLE_THREAT_BONUS = A.DOUBLE_THREAT_BONUS;
+const TEMPO_BONUS = A.TEMPO_BONUS;
+const TT_MAX_ENTRIES = A.TT_MAX_ENTRIES;
+const TT_EXACT = A.TT_EXACT;
+const TT_LOWER = A.TT_LOWER;
+const TT_UPPER = A.TT_UPPER;
+const TT_SIDE_ME = A.TT_SIDE_ME;
+const TT_SIDE_OPP = A.TT_SIDE_OPP;
+const TT_PERSP_BLACK = A.TT_PERSP_BLACK;
+const TT_PERSP_WHITE = A.TT_PERSP_WHITE;
+
+/* 页面侧状态：测试固定 moveVariety=0 关闭随机，保证断言确定 */
+const playerColor = BLACK;
+const aiColor = WHITE;
+A.setColors(playerColor, aiColor);
+A.setMoveVariety(0);
+
+/* 棋盘直接复用引擎持有的那一份（put/reset 都写它） */
+const board = A.board;
 function reset() { for (let r = 0; r < S; r++) for (let c = 0; c < S; c++) board[r][c] = EMPTY; }
 function put(color, cells) { for (const [r, c] of cells) board[r][c] = color; }
+const inB = (r, c) => r >= 0 && r < S && c >= 0 && c < S;
 
-const A = api(S, board, EMPTY, BLACK, WHITE, AI_COLOR, DIRECTIONS, LIVE_THREE_SCORE,
-              HINT_RADIUS, WIN_SCORE, SEARCH_DEPTH, CANDIDATE_LIMIT, ROOT_CANDIDATE_LIMIT, SEARCH_BUDGET_MS, MEDIUM_SEARCH_DEPTH, MEDIUM_SEARCH_BUDGET_MS,
-              VCF_MAX_PLIES, VCF_NODE_LIMIT, VCF_TIME_BUDGET_MS, VCT_MAX_PLIES, VCT_NODE_LIMIT, VCT_TIME_BUDGET_MS,
-              OPENING_TOTAL_MOVES, OPENING_DOUBLE_BONUS, CONNECT_BONUS, CENTER_WEIGHT, DOUBLE_THREAT_BONUS, TEMPO_BONUS,
-              LEVEL_EASY, LEVEL_MEDIUM, LEVEL_HARD, playerColor, aiColor, aiLevel, moveVariety, searchState, lastVcfPath, lastVctPath, performance, WIN_RATE_SCALE, WIN_RATE_COMBO_WEIGHT,
-              TT_MAX_ENTRIES, TT_EXACT, TT_LOWER, TT_UPPER, TT_SIDE_ME, TT_SIDE_OPP, TT_PERSP_BLACK, TT_PERSP_WHITE, OPENING_BOOK, OPENING_BOOK_MAX_STONES, PATTERN_TABLE);
+const aiLevel = LEVEL_MEDIUM;
 
 let pass = 0, fail = 0;
 function check(label, actual, expected) {
@@ -190,8 +177,7 @@ checkTrue('getBestMove(medium, BLACK) 返回活三端点',
 
 console.log('== 场景13：猜先玩家执白时，AI/点评按动态颜色分析 ==');
 // 模拟猜先结果：玩家执白、AI 执黑
-playerColor = WHITE;
-aiColor = BLACK;
+A.setColors(WHITE, BLACK);
 reset();
 put(playerColor, [[10, 5], [10, 6], [10, 7]]);   // 玩家的活三（两端开放）
 const blk = A.getBestMove(LEVEL_MEDIUM);          // 默认 aiColor=BLACK → 应堵玩家的活三
@@ -200,8 +186,8 @@ checkTrue('AI（黑）堵玩家（白）活三端点',
 const p = A.analyzePoint(10, 8, playerColor);     // 白在 (10,8) 可连成四
 checkTrue('玩家视角棋型按执白颜色识别',
           p.count === 4 && p.open === 2);
-playerColor = BLACK;                              // 还原默认，避免影响后续
-aiColor = WHITE;
+A.setColors(BLACK, A.aiColor);                              // 还原默认，避免影响后续
+A.setColors(A.playerColor, WHITE);
 
 console.log('== 场景14：对手意图判断（analyzeOpponentIntent） ==');
 reset();
