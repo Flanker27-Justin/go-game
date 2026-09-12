@@ -1,0 +1,9 @@
+chore: 不再跟踪 outputs/logs/（启动脚本的运行日志属运行时产物）
+
+测试一键启动脚本时生成的 outputs/logs/server.log.err（644 字节，内容是我测试时的
+EADDRINUSE 报错）被 `git add -A` 一并提交了。这类运行日志不应入库：
+
+- .gitignore 增加 `outputs/logs/`
+- git rm --cached 移除已跟踪的 outputs/logs/server.log.err，并删除工作区文件
+
+启动脚本首次运行时会自动重建该目录。

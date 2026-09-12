@@ -4,6 +4,8 @@ work/_qrdept/
 
 # ===== 运行/临时产物 =====
 *.log
+# 启动脚本会在这里写运行日志（server.log / server.log.err），属运行时产物
+outputs/logs/
 work/_chrome-profile/
 work/_html-split-candidate.html
 
