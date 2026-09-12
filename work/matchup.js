@@ -29,7 +29,7 @@ const EMPTY = 0, BLACK = 1, WHITE = 2;
 const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
 
 /** 在独立沙箱里加载一份引擎（各自独立的棋盘与搜索缓存） */
-function loadEngine(file) {
+function loadEngine(file, opts) {
   const src = fs.readFileSync(file, 'utf8');
   const sandbox = { module: { exports: {} }, console, performance: { now: () => Date.now() }, Math, JSON, Set, Map, Int32Array, Array, Object, Number, String, isNaN, parseInt, parseFloat, Infinity, NaN };
   sandbox.globalThis = sandbox;
@@ -38,16 +38,18 @@ function loadEngine(file) {
   const api = sandbox.module.exports;
   api.setMoveVariety(0);
   api.setBoardSize(S);
+  /* 可选：启用候选引擎里的“滑动窗口评估”开关（若该引擎提供 setWindowEval） */
+  if (opts && opts.windowEval && typeof api.setWindowEval === 'function') api.setWindowEval(true);
   return api;
 }
 
-const A = loadEngine(ENGINE_A);
-const B = loadEngine(ENGINE_B);
-const sameEngine = ENGINE_A === ENGINE_B;
+const A = loadEngine(ENGINE_A, { windowEval: argv.includes('--awin') });
+const B = loadEngine(ENGINE_B, { windowEval: argv.includes('--bwin') });
+const sameEngine = ENGINE_A === ENGINE_B && !argv.includes('--awin') && !argv.includes('--bwin');
 
 console.log('==== 引擎 A/B 对弈 ====');
-console.log('A: ' + path.relative(ROOT, ENGINE_A));
-console.log('B: ' + path.relative(ROOT, ENGINE_B) + (sameEngine ? '  (与 A 相同 → 自洽性检查)' : ''));
+console.log('A: ' + path.relative(ROOT, ENGINE_A) + (argv.includes('--awin') ? '  [滑动窗口评估]' : '  [原评估]'));
+console.log('B: ' + path.relative(ROOT, ENGINE_B) + (argv.includes('--bwin') ? '  [滑动窗口评估]' : '  [原评估]') + (sameEngine ? '  (与 A 相同 → 自洽性检查)' : ''));
 console.log(`难度 ${LEVEL}，${GAMES} 局，交替执黑，种子 ${SEED}`);
 
 /* 裁判棋盘（独立于两侧引擎） */
