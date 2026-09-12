@@ -1,0 +1,9 @@
+fix(launcher): 修正启动脚本的行尾与编码属性（功能性依赖）
+
+- `启动五子棋.bat` 改为 CRLF：cmd.exe 对 LF-only 批处理在变量展开（`%~dp0`）上有已知问题
+- `启动五子棋.ps1` 保持 LF + UTF-8 BOM：Windows PowerShell 5.1 在无 BOM 时会按 ANSI 解析中文
+- `.gitattributes` 显式固定上述属性，并加注释说明这两项是有功能含义的、不要当成普通格式化删掉
+  （之前 `.ps1` 被写成 CRLF、`.bat` 是 LF，两者都与运行环境的要求相反）
+
+复检：`.bat` CRLF=55 / 纯 ASCII（中文仅出现在被引用的中文文件名上）；`.ps1` LF=182 / 带 BOM，
+PowerShell 语法解析通过；文档一致性检查 20/20。
