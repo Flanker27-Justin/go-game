@@ -81,11 +81,22 @@ put(BLACK, [[10, 4], [10, 9]]);               // B X X X _ B
 check('横向 directionScore(10,8) = 0（死四方向）', A.directionScore(10, 8, 0, 1, WHITE), 0);
 check('evaluateCell(10,8) < 1000（无真实威胁分）', A.evaluateCell(10, 8, WHITE) < 1000, true);
 
-console.log('== 场景2：真实冲四仍是高价值威胁 ==');
+console.log('== 场景2：真实冲四仍是高价值威胁，且必须高于活三 ==');
 reset();
 put(WHITE, [[10, 6], [10, 7], [10, 8]]);
 put(BLACK, [[10, 5]]);                        // B X X X _（右侧有空位）
-check('冲四 = 10000', A.directionScore(10, 9, 0, 1, WHITE), 10000);
+/* P0 修正后分值分层：冲四 20000 > 活三 10000；断言改为“查表取值 + 序关系”，
+ * 这样以后调分值不必再改断言（只要求档位关系正确）。 */
+const SCORE_RUSH_FOUR = A.PATTERN_TABLE[4][1];
+const SCORE_LIVE_THREE = A.PATTERN_TABLE[3][2];
+const SCORE_SLEEP_THREE = A.PATTERN_TABLE[3][1];
+const SCORE_LIVE_TWO = A.PATTERN_TABLE[2][2];
+const SCORE_SLEEP_TWO = A.PATTERN_TABLE[2][1];
+check('冲四 = PATTERN_TABLE[4][1]', A.directionScore(10, 9, 0, 1, WHITE), SCORE_RUSH_FOUR);
+check('冲四 > 活三（旧版同分是缺陷）', SCORE_RUSH_FOUR > SCORE_LIVE_THREE, true);
+check('活三 > 眠三', SCORE_LIVE_THREE > SCORE_SLEEP_THREE, true);
+check('活二 > 眠二', SCORE_LIVE_TWO > SCORE_SLEEP_TWO, true);
+check('眠三 < LIVE_THREE_SCORE（不会被误判为有效威胁）', SCORE_SLEEP_THREE < A.LIVE_THREE_SCORE, true);
 
 console.log('== 场景3：活四（两端都开放）= 100000 ==');
 reset();
