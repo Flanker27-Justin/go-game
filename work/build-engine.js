@@ -144,6 +144,46 @@ if (/^\s*(let|const|var)\s+(boardSize|board|playerColor|aiColor|moveVariety)\b/m
   throw new Error('常量段里混入了状态声明，说明段落边界识别有误');
 }
 
+/* ---------- 1b. 状态段 ----------
+ * ★ 状态段也必须从模块抽取，而不能固定用模板里的那份：引擎状态变量会随改造增减
+ *   （例如“增量棋型评估”改造新增了 evalReady / cgFive / boardHashLo / ttGen 等）。
+ *   若生成器只输出模板的旧状态段，就会出现“函数用到了新状态变量、但没有声明”，
+ *   运行时报 xxx is not defined（曾因此让 evalReady is not defined，
+ *   整个引擎不可用、多个测试同时失败）。 */
+const rawStateText = lines
+  .slice(iState + 1, iFuncs)
+  .join('\n')
+  .trim();
+/* ★ 丢弃开头的说明性注释块：它会随每次生成被搬进模块，导致产物不幂等（实测每跑一次
+ *   多 9 行注释）。这里只保留真正的状态声明与紧随其后的行内注释。 */
+const stateText = (() => {
+  const ls = rawStateText.split('\n');
+  let k = 0;
+  while (k < ls.length && /^\s*(\/\*|\*|\/\/)/.test(ls[k])) {
+    /* 跳过连续的注释行；遇到 /** 起始后要一直跳到其闭合行 */
+    if (/^\s*\/\*/.test(ls[k]) && !/\*\/\s*$/.test(ls[k])) {
+      k++;
+      while (k < ls.length && !/\*\/\s*$/.test(ls[k])) k++;
+      k++;
+      continue;
+    }
+    k++;
+  }
+  return ls.slice(k).join('\n').trim();
+})();
+if (!stateText) throw new Error('状态段为空，段落边界可能失配');
+if (!/^\s*(let|const|var)\s+boardSize\b/m.test(stateText)) {
+  throw new Error('状态段里没有 boardSize 声明，段落边界可能失配');
+}
+/* 自检：状态段必须覆盖模块里出现的全部顶层声明（防止漏抽） */
+{
+  const body = lines.slice(iState, iFuncs).join('\n');
+  const declaredInModule = new Set([...body.matchAll(/^\s*(?:let|const|var)\s+([A-Za-z_$][\w$]*)/gm)].map(m => m[1]));
+  const declaredInText = new Set([...stateText.matchAll(/^\s*(?:let|const|var)\s+([A-Za-z_$][\w$]*)/gm)].map(m => m[1]));
+  const missing = [...declaredInModule].filter(n => !declaredInText.has(n));
+  if (missing.length) throw new Error('状态段抽取不完整，缺少: ' + missing.join(', '));
+}
+
 /* ---------- 2. 函数段：按顶层 function 逐个重建（保留 JSDoc） ---------- */
 const funcsText = lines.slice(iFuncs + 1, iBook).join('\n').trim();
 const fnNames = [...funcsText.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]);
@@ -181,12 +221,15 @@ const bookEntries = Object.values(bookData).reduce((n, v) => n + v.length, 0);
 /* ---------- 4. 渲染模板 ---------- */
 let out = fs.readFileSync(TEMPLATE, 'utf8');
 out = out.replace('@@CONSTS@@', () => constsText);
+out = out.replace('@@STATE@@', () => stateText);
 out = out.replace('@@FUNCS@@', () => funcsRebuilt);
 out = out.replace('@@OPENING_BOOK@@', () => 'const OPENING_BOOK = ' + JSON.stringify(bookData) + ';');
 
 /* ---------- 5. 自检 ---------- */
 const problems = [];
-if (out.includes('@@')) problems.push('模板仍有未替换的占位符');
+/* 占位符自检：只认“独占一行的 @@NAME@@”（正文里对占位符的说明性提及不算） */
+const leftover = [...out.matchAll(/^\s*@@[A-Z_]+@@\s*$/gm)].map(m => m[0].trim());
+if (leftover.length) problems.push('模板仍有未替换的占位符: ' + [...new Set(leftover)].join(', '));
 
 function codeOnly(text) {
   return text
@@ -202,7 +245,8 @@ const dupes = declared.filter((n, i) => declared.indexOf(n) !== i);
 if (dupes.length) problems.push('重复函数定义: ' + [...new Set(dupes)].join(', '));
 if (declared.length !== fnNames.length) problems.push(`函数数量不符: ${declared.length} vs ${fnNames.length}`);
 
-const TEMPLATE_API = new Set(['setBoardSize', 'resizeBoard', 'setColors', 'setMoveVariety', 'resetState']);
+const TEMPLATE_API = new Set(['setBoardSize', 'resizeBoard', 'setColors', 'setMoveVariety', 'resetState',
+  'evalStats', 'ensureEvalState', 'publicFn']);
 const MODULE_DATA = new Set(['board', 'boardSize', 'playerColor', 'aiColor', 'moveVariety', 'lastVcfPath', 'lastVctPath']);
 const NESTED_LOCAL = new Set(['counterScore', 'tieScore', 'consider', 'push', 'addPt', 'pushBits']);
 const BUILTIN = new Set(['Array', 'Math', 'JSON', 'Object', 'Number', 'String', 'Set', 'Map', 'Int32Array',

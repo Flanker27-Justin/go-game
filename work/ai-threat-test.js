@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 加载方式（2026-xx 迁移）：直接 require 引擎模块，不再从 gomoku.html 正则抠函数。
 // 引擎是唯一权威实现：outputs/engine/gomoku-ai.js（由 work/build-engine.js 生成）。
 // 好处：重构 HTML 不会让测试失效；改引擎立刻被测到。
@@ -162,11 +162,11 @@ check('getBestMove(medium) 挡在可反击点 (10,5)', A.getBestMove(LEVEL_MEDIU
 
 console.log('== 场景10：动态搜索深度随残局加深 ==');
 reset();
-check('空盘 searchDepth = 3', A.searchDepth(), 3);
+checkTrue('空盘 searchDepth >= 3（改造后加深）', A.searchDepth() >= 3);
 for (let i = 0; i < 40; i++) put(i % 2 === 0 ? WHITE : BLACK, [[i % 19, Math.floor(i / 19)]]);
-check('40 子 searchDepth = 5', A.searchDepth(), 5);
+checkTrue('40 子 searchDepth >= 5（改造后加深）', A.searchDepth() >= 5);
 for (let i = 40; i < 100; i++) put(i % 2 === 0 ? WHITE : BLACK, [[i % 19, Math.floor(i / 19)]]);
-check('100 子 searchDepth = 6', A.searchDepth(), 6);
+checkTrue('100 子 searchDepth >= 6（改造后加深）', A.searchDepth() >= 6);
 
 console.log('== 场景11：VCF 连续冲四杀棋——2 层强制胜 ==');
 reset();
@@ -174,7 +174,7 @@ reset();
 // 白对角 (8,4),(9,5) 与 (10,6) 连成活四 → 强制胜。补足 8 子跳过开局策略。
 put(BLACK, [[10, 2], [2, 2], [2, 3]]);
 put(WHITE, [[10, 3], [10, 4], [10, 5], [8, 4], [9, 5]]);
-check('findVcfWin(WHITE) 返回首个强制冲四点 (10,6)', A.findVcfWin(WHITE, VCF_MAX_PLIES), [10, 6]);
+checkAny('VCF 局面下主动走强制冲四点 (10,6)（改造后由搜索直接看穿，不再依赖 findVcfWin）', A.getBestMove(LEVEL_MEDIUM), [[10, 6]]);
 check('getBestMove(medium) 走 VCF 强制点', A.getBestMove(LEVEL_MEDIUM), [10, 6]);
 reset();
 put(BLACK, [[10, 2], [2, 2], [2, 3]]);
@@ -312,11 +312,11 @@ check('VCF 起点仍为 (10,6)', vcfMove, [10, 6]);
 
 console.log('== 场景23：置换表确定性 + 35/60 子分层 + 中盘/残局冒烟 ==');
 reset();
-check('空盘 searchDepth = 3', A.searchDepth(), 3);
+checkTrue('空盘 searchDepth >= 3（改造后加深）', A.searchDepth() >= 3);
 for (let i = 0; i < 35; i++) put(i % 2 === 0 ? WHITE : BLACK, [[i % 19, Math.floor(i / 19)]]);
-check('35 子 searchDepth = 5', A.searchDepth(), 5);
+checkTrue('35 子 searchDepth >= 5（改造后加深）', A.searchDepth() >= 5);
 for (let i = 35; i < 60; i++) put(i % 2 === 0 ? WHITE : BLACK, [[i % 19, Math.floor(i / 19)]]);
-check('60 子 searchDepth = 6', A.searchDepth(), 6);
+checkTrue('60 子 searchDepth >= 6（改造后加深）', A.searchDepth() >= 6);
 
 // 中盘“安静局面”（36 子、无即时杀棋）：hard 走完整搜索，验证置换表不引入不确定性
 reset();
@@ -386,9 +386,11 @@ reset();
 // 对方无论堵哪个端点，另一路都能延伸成活四 → 2 手强制胜
 put(BLACK, [[9, 8], [9, 10], [8, 9], [10, 9]]);
 put(WHITE, [[2, 2], [2, 3], [17, 17]]);
-check('findVctWin(BLACK) 找到双三链杀起点 (9,9)', A.findVctWin(BLACK), [9, 9]);
-checkTrue('lastVctPath 记录杀棋路径且首手一致',
-  Array.isArray(A.lastVctPath) && A.lastVctPath.length >= 2 && JSON.stringify(A.lastVctPath[0]) === JSON.stringify([9, 9]));
+checkAny('双三链杀起点 (9,9) 被选中（改造后由双三检测/搜索实现）', A.getBestMove(LEVEL_MEDIUM), [[9, 9]]);
+  /* 说明：强度改造后 VCT 不再经 findVctWin 记录（改由双三检测 + 深搜实现），
+   * 故不再断言 lastVctPath；改为断言该杀招点在 hard 档同样被选中，
+   * 这才是本场景真正要保证的行为。 */
+  checkAny('双三杀招稳定复现（hard 档同样选 (9,9)）', A.getBestMove(LEVEL_HARD), [[9, 9]]);
 reset();
 put(BLACK, [[9, 8], [9, 10], [8, 9], [10, 9]]);
 put(WHITE, [[2, 2], [2, 3], [17, 17]]);

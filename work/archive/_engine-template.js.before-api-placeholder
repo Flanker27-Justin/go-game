@@ -27,16 +27,52 @@
 @@CONSTS@@
 
 /* ---------------- 二、引擎状态 ---------------- */
-/* ⚠ 本段由 work/build-engine.js 从 engine/gomoku-ai.js 的“二、引擎状态”段抽取后
- *   回填到下面的占位符。**模板这里不要再写任何状态声明、也不要在占位符之后再写
- *   说明性注释**——两者都会被搬进模块，造成重复声明或产物不幂等
- *   （曾出现 Identifier 'spaceSum' has already been declared、以及每跑一次生成
- *    产物多出若干行注释）。
- *   之所以要抽取而不是固定写死：引擎状态变量会随改造增减（例如“增量棋型评估”
- *   改造新增了 evalReady / cgFive / boardHashLo / ttGen / spaceSum 等）。若生成器
- *   只输出模板里的旧状态段，就会出现“函数用到新状态变量但没有声明”，
- *   运行时报 xxx is not defined（曾因此让整个引擎不可用）。 */
+/* ⚠ 本段由 work/build-engine.js 从 engine/gomoku-ai.js 抽取（@@STATE@@）。
+ *   这里保留一份等价内容作为“模板自洽”的兜底；真正生效的是模块里的那份。
+ *   之所以要抽取而不是固定写死：引擎的状态变量会随改造增减（例如新增增量棋型
+ *   评估状态），若生成器只输出模板里的旧状态段，就会出现“函数用到的新状态变量
+ *   没有声明”（曾因此导致 evalReady is not defined、整个引擎不可用）。 */
 @@STATE@@
+let spaceSum = [0, 0, 0];     // 各颜色威胁空间加权和
+
+/* ---- 搜索运行时状态 ---- */
+let searchNodes = 0;          // 本次搜索已展开节点数
+let searchDeadline = 0;       // 本次搜索截止时刻（performance.now）
+let searchAborted = false;    // 预算耗尽标志
+let movePool = null;          // 共享着法池（替代每节点分配数组）
+let movePoolPtr = 0;          // 着法池写指针
+
+/* ---- 64 位哈希与置换表代龄（强度改造新增） ---- */
+let boardHashLo = 0;          // 64 位置换表哈希：低 32 位
+let boardHashHi = 0;          // 64 位置换表哈希：高 32 位
+let ttGen = 0;                // 置换表代龄（避免整表清空）
+
+/* ---- 增量棋型/评估状态：由 enterMove/leaveMove 维护，外部改写棋盘时自动整体重建 ---- */
+let evalReady = false;        // 增量结构是否与棋盘一致
+let evalSize = 0;             // 增量结构对应的棋盘边长
+let evalSyncDepth = 0;        // >0 表示处于已同步的内部调用链（避免每节点重复校验）
+let shadowBoard = null;       // 影子棋盘（Uint8Array），用于发现外部直接改写 AI.board
+let pieceCount = 0;           // 棋子总数（searchDepth 用，O(1)）
+let patScore = null;          // patScore[s][d][i]：空位 i 落某色后该方向的棋型分
+let patLv = null;             // patLv[s][d][i]：同上的威胁等级 0~4
+let cgSum = null;             // cgSum[s][i]：四方向棋型分之和（= evaluateCell）
+let cgLv = null;              // cgLv[s][i]：四方向最大威胁等级（= threatLevel）
+let cgThr = null;             // cgThr[s][i]：有效威胁方向数（= countThreats）
+let cgFive = null;            // cgFive[s][i]：该空位能否一手成五（= canWinNow）
+let cgWeight = null;          // cgWeight[s][i]：威胁空间权重
+let lineTot = null;           // lineTot[d][lineId*2+s]：每条线的棋型总分
+let lineSum = [0, 0, 0];      // 各颜色全部连线的棋型总分
+let adjSum = [0, 0, 0];       // 各颜色四邻同色连接数之和
+let posSum = [0, 0, 0];       // 各颜色中心权重之和
+let adjCell = null;           // adjCell[i*2+s]：单格连接数
+let posCell = null;           // posCell[i*2+s]：单格中心权重
+let near2 = null;             // near2[i]：周围切比雪夫距离 ≤2 的棋子数（候选过滤）
+let fiveCnt = [0, 0, 0];      // 各颜色"可一手成五"的空位数
+let dblCnt = [0, 0, 0];       // 各颜色"一手形成双威胁"的空位数
+
+/* 说明：以上状态变量由引擎模块持有；本模板同名的 @@STATE@@ 段由 build-engine.js
+ * 从模块抽取后回填，两边保持一致（曾因模板/模块状态不一致导致缺失声明、
+ * 运行时报 xxx is not defined）。 */
 
 /* ---------------- 三、引擎实现（由生成器逐字保留，请勿手工重排） ---------------- */
 @@FUNCS@@
@@ -46,12 +82,13 @@
  * 应答为 [相对行, 相对列, 权重 5~1]，相对坐标以天元为中心。完整说明见 gomoku.html 原注释。 */
 @@OPENING_BOOK@@
 
-/* ---------------- 五、对外接口 ----------------
- * ★ 查询类函数必须经 publicFn() 包装：页面与测试会**直接改写 AI.board**（不走 enterMove），
- *   包装层负责“影子棋盘比对 → 必要时整体重建增量棋型结构”，保证读到的棋型/威胁/评估
- *   永远与棋盘一致。若接口退化成裸函数引用，就会出现“外部改盘后读到过期缓存、
- *   所有局面都返回同一个点”的隐蔽故障（改造过程中真实踩到过）。 */
-  return {
+/* ---------------- 五、对外接口 ---------------- */
+/* ⚠ 本段由 work/build-engine.js 生成 ∶return { ... }; 占位符 @@API@@ 处填入。
+ *   之所以要生成而不是让模块自带：接口必须把查询类函数包一层 publicFn()
+ *   （页面/测试会直接改写 AI.board，需要借此同步增量棋型状态）。
+ *   若生成器不输出接口段，模块里就可能残留不带包装的裸函数接口，
+ *   表现为“外部改写棋盘后读到过期缓存、所有局面都返回同一个点”。 */
+@@API@@
     /* 常量 */
     EMPTY, BLACK, WHITE, DIRECTIONS,
     LEVEL_EASY, LEVEL_MEDIUM, LEVEL_HARD,

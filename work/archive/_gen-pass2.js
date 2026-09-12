@@ -129,7 +129,41 @@ const PATTERN_TABLE = [
   [1000000, 1000000, 1000000], // 5 子及以上：已成五连
 ];
 
+/* ---------------- 增量棋型引擎与深搜所需常量（强度改造新增） ---------------- */
+/* 成五分值：lineScore 对 count>=5 返回 PATTERN_TABLE[5][0]，据此可 O(1) 判定"该点能成五" */
+const FIVE_SCORE = 1000000;
+
+/* 威胁空间权重（按威胁等级 0~4）：与旧 threatSpaceBonus 的 [0,600,2000,15000,80000] 一致 */
+const SPACE_WEIGHT = [0, 600, 2000, 15000, 80000];
+
+/* 静止搜索（quiescence）：叶节点只延展冲四/活四/必须的挡点，看穿"静态评估看不见"的杀棋链。
+ * 上限既控制耗时，也保证 VCF 一类的连续冲四能被看穿到 8 手以上。 */
+const QUIESCE_MAX_PLIES = 8;
+
+/* 搜索节点上限保护：极端局面下防止单个节点展开失控 */
+const MAX_MOVES_PER_NODE = 48;
+
+/* 着法池容量：用共享数组代替每节点分配小数组，避免深搜时 GC 抖动。
+ * 深度上限约 (searchDepth 12 + 静止 8) 层、每层最多 48 个着法，8192 有充足余量。 */
+const MOVE_POOL_SIZE = 16384;
+
+/* 搜索用的"无穷大"（必须显著大于 WIN_SCORE 且参与取负运算仍然安全） */
+const INF_SCORE = 1e10;
+
+/* 置换表淘汰代龄：不清空整表，只淘汰两代之前的旧条目 */
+const TT_SWEEP_KEEP_GENS = 2;
+
 /* ---------------- 二、引擎状态 ---------------- */
+/* ⚠ 本段由 work/build-engine.js 从 engine/gomoku-ai.js 抽取后回填（占位符见下一行）。
+ *   这里保留一份等价内容作为“模板自洽”的兜底；真正生效的是模块里的那份。
+ *   之所以要抽取而不是固定写死：引擎的状态变量会随改造增减（例如新增增量棋型
+ *   评估状态），若生成器只输出模板里的旧状态段，就会出现“函数用到的新状态变量
+ *   没有声明”（曾因此导致 evalReady is not defined、整个引擎不可用）。 */
+/* ⚠ 本段由 work/build-engine.js 从 engine/gomoku-ai.js 抽取后回填（占位符见下一行）。
+ *   这里保留一份等价内容作为“模板自洽”的兜底；真正生效的是模块里的那份。
+ *   之所以要抽取而不是固定写死：引擎的状态变量会随改造增减（例如新增增量棋型
+ *   评估状态），若生成器只输出模板里的旧状态段，就会出现“函数用到的新状态变量
+ *   没有声明”（曾因此导致 evalReady is not defined、整个引擎不可用）。 */
 /* 棋盘：引擎自己持有，游戏侧通过 GomokuAI.board 直接读写（不要重新赋值棋盘变量） */
 let boardSize = 19;
 let board = Array.from({ length: boardSize }, () => Array(boardSize).fill(EMPTY));
@@ -145,6 +179,62 @@ let boardHash = 0;            // 增量棋盘哈希
 let historyTable = null;      // 历史启发表
 let killerTable = null;       // 杀手表
 
+/* ---- 以下为强度改造新增的状态：搜索运行时 / 64 位哈希 / 置换表代龄 / 增量棋型评估 ---- */
+
+let spaceSum = [0, 0, 0];     // 各颜色威胁空间加权和
+
+/* ---- 搜索运行时状态 ---- */
+let searchNodes = 0;          // 本次搜索已展开节点数
+let searchDeadline = 0;       // 本次搜索截止时刻（performance.now）
+let searchAborted = false;    // 预算耗尽标志
+let movePool = null;          // 共享着法池（替代每节点分配数组）
+let movePoolPtr = 0;          // 着法池写指针
+
+/* ---- 64 位哈希与置换表代龄（强度改造新增） ---- */
+let boardHashLo = 0;          // 64 位置换表哈希：低 32 位
+let boardHashHi = 0;          // 64 位置换表哈希：高 32 位
+let ttGen = 0;                // 置换表代龄（避免整表清空）
+
+/* ---- 增量棋型/评估状态：由 enterMove/leaveMove 维护，外部改写棋盘时自动整体重建 ---- */
+let evalReady = false;        // 增量结构是否与棋盘一致
+let evalSize = 0;             // 增量结构对应的棋盘边长
+let evalSyncDepth = 0;        // >0 表示处于已同步的内部调用链（避免每节点重复校验）
+let shadowBoard = null;       // 影子棋盘（Uint8Array），用于发现外部直接改写 AI.board
+let pieceCount = 0;           // 棋子总数（searchDepth 用，O(1)）
+let patScore = null;          // patScore[s][d][i]：空位 i 落某色后该方向的棋型分
+let patLv = null;             // patLv[s][d][i]：同上的威胁等级 0~4
+let cgSum = null;             // cgSum[s][i]：四方向棋型分之和（= evaluateCell）
+let cgLv = null;              // cgLv[s][i]：四方向最大威胁等级（= threatLevel）
+let cgThr = null;             // cgThr[s][i]：有效威胁方向数（= countThreats）
+let cgFive = null;            // cgFive[s][i]：该空位能否一手成五（= canWinNow）
+let cgWeight = null;          // cgWeight[s][i]：威胁空间权重
+let lineTot = null;           // lineTot[d][lineId*2+s]：每条线的棋型总分
+let lineSum = [0, 0, 0];      // 各颜色全部连线的棋型总分
+let adjSum = [0, 0, 0];       // 各颜色四邻同色连接数之和
+let posSum = [0, 0, 0];       // 各颜色中心权重之和
+let adjCell = null;           // adjCell[i*2+s]：单格连接数
+let posCell = null;           // posCell[i*2+s]：单格中心权重
+let near2 = null;             // near2[i]：周围切比雪夫距离 ≤2 的棋子数（候选过滤）
+let fiveCnt = [0, 0, 0];      // 各颜色"可一手成五"的空位数
+let dblCnt = [0, 0, 0];       // 各颜色"一手形成双威胁"的空位数
+
+/* 说明：以上状态变量由引擎模块持有；本模板同名的 @@STATE@@ 段由 build-engine.js
+ * 从模块抽取后回填，两边保持一致（曾因模板/模块状态不一致导致缺失声明、
+ * 运行时报 xxx is not defined）。 */
+
+/* ---- 补漏声明 ---- */
+let candScratch = null;      // 候选点临时缓冲（强度改造新增）
+
+let scoreScratch = 0;   // 兼容补漏（原改造漏声明）
+
+/* 说明：以上状态变量全部由引擎模块提供（生成器从 engine/gomoku-ai.js 的
+ * “二、引擎状态”段抽取后回填到此占位符）。**模板这里不要再写任何状态声明**，
+ * 否则会与回填内容重复声明（曾出现 Identifier 'spaceSum' has already been declared）。 */
+
+/* 说明：以上状态变量全部由引擎模块提供（生成器从 engine/gomoku-ai.js 的
+ * “二、引擎状态”段抽取后回填到此占位符）。**模板这里不要再写任何状态声明**，
+ * 否则会与回填内容重复声明（曾出现 Identifier 'spaceSum' has already been declared）。 */
+
 /* ---------------- 三、引擎实现（由生成器逐字保留，请勿手工重排） ---------------- */
 /* ============================================================
  * 四、工具函数
@@ -153,6 +243,318 @@ let killerTable = null;       // 杀手表
 /** (r, c) 是否在棋盘范围内 */
 function inBoard(r, c) {
   return r >= 0 && r < boardSize && c >= 0 && c < boardSize;
+}
+
+/** 按当前 boardSize 分配全部增量结构（棋盘尺寸变化时重建） */
+function allocEvalTables() {
+  const n = boardSize * boardSize;
+  evalSize = boardSize;
+  shadowBoard = new Uint8Array(n);
+  patScore = []; patLv = []; cgSum = []; cgLv = []; cgThr = []; cgFive = []; cgWeight = [];
+  for (let s = 0; s < 2; s++) {
+    patScore[s] = []; patLv[s] = [];
+    for (let d = 0; d < 4; d++) {
+      patScore[s][d] = new Int32Array(n);
+      patLv[s][d] = new Uint8Array(n);
+    }
+    cgSum[s] = new Int32Array(n);
+    cgLv[s] = new Uint8Array(n);
+    cgThr[s] = new Uint8Array(n);
+    cgFive[s] = new Uint8Array(n);
+    cgWeight[s] = new Int32Array(n);
+  }
+  lineTot = [
+    new Float64Array(boardSize * 2),
+    new Float64Array(boardSize * 2),
+    new Float64Array((boardSize * 2 - 1) * 2),
+    new Float64Array((boardSize * 2 - 1) * 2),
+  ];
+  adjCell = new Int8Array(n * 2);
+  posCell = new Int16Array(n * 2);
+  near2 = new Int16Array(n);
+  evalReady = false;
+}
+
+/** 方向 dir 上第 id 条线的编号（用于 lineTot 索引） */
+function lineIdOf(dir, r, c) {
+  if (dir === 0) return r;
+  if (dir === 1) return c;
+  if (dir === 2) return r - c + boardSize - 1;
+  return r + c;
+}
+
+/** 方向 dir 上第 id 条线的起点坐标 */
+function lineStartOf(dir, id) {
+  if (dir === 0) return [id, 0];
+  if (dir === 1) return [0, id];
+  if (dir === 2) {
+    const rr = Math.max(0, id - (boardSize - 1));
+    return [rr, rr - id + boardSize - 1];
+  }
+  const rr = id < boardSize ? 0 : id - boardSize + 1;
+  return [rr, id - rr];
+}
+
+/**
+ * 单趟扫描一条线，累加 color 的全部棋型分（只对每个连续段的起点计一次分）。
+ * 与旧 lineInfo + lineScore 的口径严格等价：
+ *   段起点处 count = 1 + min(左侧连子,4) + min(右侧连子,4)（≥5 时一律按成五计），
+ *   两端"紧邻连续空位数"各最多 4 个，reachable = count + 空位总数 >= 5。
+ */
+function scoreRunsOnLine(startR, startC, dr, dc, color) {
+  let total = 0;
+  let r = startR, c = startC;
+  while (inBoard(r, c)) {
+    if (board[r][c] !== color) { r += dr; c += dc; continue; }
+    let count = 0, rr = r, cc = c;
+    while (inBoard(rr, cc) && board[rr][cc] === color) { count++; rr += dr; cc += dc; }
+    let ls = 0, ar = r - dr, ac = c - dc;
+    while (ls < 4 && inBoard(ar, ac) && board[ar][ac] === EMPTY) { ls++; ar -= dr; ac -= dc; }
+    let rs = 0;
+    while (rs < 4 && inBoard(rr, cc) && board[rr][cc] === EMPTY) { rs++; rr += dr; cc += dc; }
+    const cnt = count > 9 ? 9 : count;
+    const open = (ls > 0 ? 1 : 0) + (rs > 0 ? 1 : 0);
+    total += lineScore(cnt, open, cnt + ls + rs >= 5);
+    r = rr; c = cc;
+  }
+  return total;
+}
+
+/** 重算方向 dir 上第 id 条线对双方的棋型总分，并更新 lineSum */
+function recomputeLine(dir, id) {
+  const st = lineStartOf(dir, id);
+  const dr = DIRECTIONS[dir][0], dc = DIRECTIONS[dir][1];
+  const o = id * 2;
+  const nb = scoreRunsOnLine(st[0], st[1], dr, dc, BLACK);
+  const nw = scoreRunsOnLine(st[0], st[1], dr, dc, WHITE);
+  lineSum[BLACK] += nb - lineTot[dir][o];
+  lineSum[WHITE] += nw - lineTot[dir][o + 1];
+  lineTot[dir][o] = nb;
+  lineTot[dir][o + 1] = nw;
+}
+
+/** 空位 i 落 color 后，方向 d 上的棋型分与威胁等级（与 lineScore/threatLevel 同口径） */
+function computePatAt(i, d, color) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const info = lineInfo(r, c, DIRECTIONS[d][0], DIRECTIONS[d][1], color);
+  const score = lineScore(info.count, info.open, info.reachable);
+  let lv = 0;
+  if (info.count >= 5) lv = 4;
+  else if (info.count === 4 && info.open === 2) lv = 3;
+  else if (info.count === 4 && info.open === 1) lv = 2;
+  else if (info.count === 3 && info.open === 2) lv = 1;
+  return [score, lv];
+}
+
+/** i 的八邻域内是否有 color 棋子（与旧 threatSpaceBonus 的邻域口径一致） */
+function adjacentToColor(i, color) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const nr = r + dr, nc = c + dc;
+      if (inBoard(nr, nc) && board[nr][nc] === color) return true;
+    }
+  }
+  return false;
+}
+
+/** 由 (i, s) 的四个方向棋型值重建该格聚合量，并同步 fiveCnt/dblCnt/spaceSum */
+function refreshCellAgg(i, s) {
+  const oldFive = cgFive[s][i], oldThr = cgThr[s][i], oldW = cgWeight[s][i];
+  let sum = 0, thr = 0, lv = 0, five = 0;
+  for (let d = 0; d < 4; d++) {
+    const v = patScore[s][d][i];
+    sum += v;
+    const l = patLv[s][d][i];
+    if (l > lv) lv = l;
+    if (v >= LIVE_THREE_SCORE) thr++;
+    if (v >= FIVE_SCORE) five = 1;
+  }
+  cgSum[s][i] = sum;
+  cgLv[s][i] = lv;
+  cgThr[s][i] = thr;
+  cgFive[s][i] = five;
+  let w = 0;
+  if (lv >= 1 && adjacentToColor(i, s + 1)) w = SPACE_WEIGHT[lv];
+  cgWeight[s][i] = w;
+  const color = s + 1;
+  if (oldFive !== five) fiveCnt[color] += five ? 1 : -1;
+  if ((oldThr >= 2) !== (thr >= 2)) dblCnt[color] += (thr >= 2) ? 1 : -1;
+  spaceSum[color] += w - oldW;
+}
+
+/** 重算单格在 dir 方向上的棋型（该方向上受落子影响的格子只需重算这一维） */
+function refreshCellDir(i, d) {
+  for (let s = 0; s < 2; s++) {
+    const p = computePatAt(i, d, s + 1);
+    patScore[s][d][i] = p[0];
+    patLv[s][d][i] = p[1];
+    refreshCellAgg(i, s);
+  }
+}
+
+/** 重算单格全部四个方向的棋型（空位）或清零（已被占用） */
+function refreshCellPatAll(i) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const empty = board[r][c] === EMPTY;
+  for (let s = 0; s < 2; s++) {
+    if (empty) {
+      for (let d = 0; d < 4; d++) {
+        const p = computePatAt(i, d, s + 1);
+        patScore[s][d][i] = p[0];
+        patLv[s][d][i] = p[1];
+      }
+    } else {
+      for (let d = 0; d < 4; d++) { patScore[s][d][i] = 0; patLv[s][d][i] = 0; }
+    }
+    refreshCellAgg(i, s);
+  }
+}
+
+/** 重算单格的连接数与中心权重 */
+function refreshCellAdjPos(i) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const color = board[r][c];
+  for (let s = 0; s < 2; s++) {
+    const k = i * 2 + s;
+    adjSum[s + 1] -= adjCell[k];
+    posSum[s + 1] -= posCell[k];
+    let a = 0, p = 0;
+    if (color === s + 1) {
+      for (const dir of DIRECTIONS) {
+        const nr = r + dir[0], nc = c + dir[1];
+        if (inBoard(nr, nc) && board[nr][nc] === color) a++;
+      }
+      const center = (boardSize - 1) / 2;
+      p = boardSize - (Math.abs(r - center) + Math.abs(c - center));
+    }
+    adjCell[k] = a;
+    posCell[k] = p;
+    adjSum[s + 1] += a;
+    posSum[s + 1] += p;
+  }
+}
+
+/** 维护 near2（切比雪夫距离 ≤2 的棋子数），用于候选点过滤 */
+function touchNear2(r, c, delta) {
+  for (let dr = -HINT_RADIUS; dr <= HINT_RADIUS; dr++) {
+    for (let dc = -HINT_RADIUS; dc <= HINT_RADIUS; dc++) {
+      if (!dr && !dc) continue;
+      const nr = r + dr, nc = c + dc;
+      if (inBoard(nr, nc)) near2[nr * boardSize + nc] += delta;
+    }
+  }
+}
+
+/**
+ * 棋盘在 (r, c) 处发生变化后刷新全部增量结构。进入前 board[r][c] 已是新值。
+ * 影响的格子只有"过 (r,c) 的四条线上 ±4 范围内的格子"（因为棋型只看连续段，
+ * 距离更远的格子结构不变），每个这样的格子只需重算它在这个方向上的棋型。
+ */
+function refreshEvalAt(r, c) {
+  const i = r * boardSize + c;
+  shadowBoard[i] = board[r][c];
+  for (let d = 0; d < 4; d++) recomputeLine(d, lineIdOf(d, r, c));
+  refreshCellAdjPos(i);
+  for (let d = 0; d < 4; d++) {
+    const nr = r + DIRECTIONS[d][0], nc = c + DIRECTIONS[d][1];
+    if (inBoard(nr, nc)) refreshCellAdjPos(nr * boardSize + nc);
+  }
+  refreshCellPatAll(i);
+  for (let d = 0; d < 4; d++) {
+    const dr = DIRECTIONS[d][0], dc = DIRECTIONS[d][1];
+    for (let k = 1; k <= 4; k++) {
+      for (let sg = 1; sg >= -1; sg -= 2) {
+        const nr = r + dr * k * sg, nc = c + dc * k * sg;
+        if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
+        refreshCellDir(nr * boardSize + nc, d);
+      }
+    }
+  }
+}
+
+/** 落子并维护全部增量结构（引擎内部唯一允许的落子方式） */
+function enterMove(r, c, color) {
+  board[r][c] = color;
+  hashXor(r, c, color);
+  pieceCount++;
+  touchNear2(r, c, 1);
+  refreshEvalAt(r, c);
+}
+
+/** 撤销落子并维护全部增量结构（与 enterMove 严格对称） */
+function leaveMove(r, c, color) {
+  board[r][c] = EMPTY;
+  hashXor(r, c, color);
+  pieceCount--;
+  touchNear2(r, c, -1);
+  refreshEvalAt(r, c);
+}
+
+/** 整盘重建增量结构（初始化、换棋盘、检测到外部直接改写棋盘时调用） */
+function rebuildEvalState() {
+  if (!patScore || evalSize !== boardSize) allocEvalTables();
+  for (let s = 0; s < 2; s++) {
+    for (let d = 0; d < 4; d++) { patScore[s][d].fill(0); patLv[s][d].fill(0); }
+    cgSum[s].fill(0); cgLv[s].fill(0); cgThr[s].fill(0); cgFive[s].fill(0); cgWeight[s].fill(0);
+  }
+  for (let d = 0; d < 4; d++) lineTot[d].fill(0);
+  adjCell.fill(0); posCell.fill(0); near2.fill(0);
+  lineSum[BLACK] = 0; lineSum[WHITE] = 0;
+  adjSum[BLACK] = 0; adjSum[WHITE] = 0;
+  posSum[BLACK] = 0; posSum[WHITE] = 0;
+  fiveCnt[BLACK] = 0; fiveCnt[WHITE] = 0;
+  dblCnt[BLACK] = 0; dblCnt[WHITE] = 0;
+  spaceSum[BLACK] = 0; spaceSum[WHITE] = 0;
+  pieceCount = 0;
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      const v = board[r][c];
+      shadowBoard[r * boardSize + c] = v;
+      if (v !== EMPTY) { pieceCount++; touchNear2(r, c, 1); }
+    }
+  }
+  for (let d = 0; d < 4; d++) {
+    const nLines = d < 2 ? boardSize : boardSize * 2 - 1;
+    for (let id = 0; id < nLines; id++) recomputeLine(d, id);
+  }
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      const i = r * boardSize + c;
+      refreshCellAdjPos(i);
+      refreshCellPatAll(i);
+    }
+  }
+  evalReady = true;
+}
+
+/** 影子棋盘比对：外部是否直接改写过 AI.board */
+function boardTouchedExternally() {
+  if (!shadowBoard || evalSize !== boardSize) return true;
+  for (let r = 0; r < boardSize; r++) {
+    const row = board[r];
+    const base = r * boardSize;
+    for (let c = 0; c < boardSize; c++) if (row[c] !== shadowBoard[base + c]) return true;
+  }
+  return false;
+}
+
+/** 保证增量结构与棋盘一致（对外入口先做一次；内部调用链中用 evalSyncDepth 短路） */
+function ensureEvalState() {
+  if (evalSyncDepth > 0) return;
+  if (evalReady && !boardTouchedExternally()) return;
+  rebuildEvalState();
+}
+
+/** 把内部函数包装成对外入口：先对齐增量评估状态，避免外部改写棋盘后读到过期数据 */
+function publicFn(fn) {
+  return function () {
+    if (evalSyncDepth === 0) ensureEvalState();
+    evalSyncDepth++;
+    try { return fn.apply(null, arguments); }
+    finally { evalSyncDepth--; }
+  };
 }
 
 /**
@@ -673,10 +1075,21 @@ function bookMove(level, side) {
 }
 
 /**
- * 获取当前难度下的最佳落点。
- * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD）
- * @param {number} [forColor] 计算视角的颜色；缺省用 aiColor（AI 实战决策）；
- *        教学推荐点时用 playerColor，用“玩家视角”计算，保证建议真正利于玩家。
+ * 难度分层的决策入口。
+ *
+ * 困难档（harness 基准与"练棋"场景）：只保留三条**可证明**的安全短路——
+ *   自己能一步成五 / 对方能一步成五 / 对方存在 VCF(连续冲四)或 VCT(活三链)杀，
+ * 其余全部交给 8~12 层负极大搜索 + 静止搜索裁决（见 hardMove）。
+ * 改造理由（仓库实测结论）：旧实现把 11 级单步战术阶梯放在搜索之前短路返回，
+ * 一整局 30 手里只有 17% 的着法真正进入搜索，因此 12 项参数级改动（分值表、
+ * 窗口评估、候选注入、加深搜索、6 个参数）全部无法提升棋力；而直接把阶梯换成
+ * 搜索又因深度不足（3 层）惨败 0:40。正确的顺序是"先把评估/威胁检测做成增量、
+ * 让搜索有能力看穿双三与 VCF/VCT 慢杀，再把决策权交还搜索"——即本轮改造。
+ *
+ * 中等档：保持"单步战术分层 + 浅搜索"的原有行为（面向新手：响应快、战术不漏），
+ * 但底层评估与威胁检测已换成增量实现，同样的预算能搜得更深。
+ * @param {string} level 难度（easy/medium/hard）
+ * @param {number} [forColor] 决策视角颜色（默认 aiColor；教学推荐玩家时传 playerColor）
  * @returns {Array|null} [r, c]
  */
 function getBestMove(level, forColor) {
@@ -693,7 +1106,10 @@ function getBestMove(level, forColor) {
     return bestByScore(me, opp, level);
   }
 
-  // 中等/困难档：完整威胁分层（一步成五 → VCF → 双杀 → 活四/活三攻防 → 开局库 → 启发式开局 → 搜索）
+  // 困难档：安全短路 + 深搜（决策权交还搜索）
+  if (level === LEVEL_HARD) return hardMove(me, opp);
+
+  // 中等档：完整威胁分层（一步成五 → VCF → 双杀 → 活四/活三攻防 → 开局库 → 启发式开局 → 浅搜索）
   {
     const aiWin = findImmediateWin(me);            // 自己能一步成五 → 直接赢
     if (aiWin) return aiWin;
@@ -716,11 +1132,9 @@ function getBestMove(level, forColor) {
     const dk = findDoubleKill(me);
     if (dk) return dk;
     // VCT 活三链杀：用“连续活三/双三”逼对方防守，直到把优势走成活四/五连。
-    // 放在双杀之后：双杀一手可成、更便宜；VCT 是多手链条，是中盘转化胜势的关键。
     const vctWin = findVctWin(me);
     if (vctWin) return vctWin;
     // 对方存在活三链杀 → 必须先堵对方活三/冲四的开放端点。
-    // 注意：对方 VCT 路径只用于决策，不写入 lastVctPath（教学只展示 AI 自己的杀棋路径）。
     const oppVct = findVctWin(opp);
     lastVctPath = null;
     if (oppVct) {
@@ -730,25 +1144,20 @@ function getBestMove(level, forColor) {
     // 对方双杀意图防守：对方下一步一手可成双三/三四/双四 → 抢先堵住关键点
     const oppDt = findOpponentDoubleThreat(opp);
     if (oppDt) return oppDt;
-    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端。
-    // 把“堵还是进攻”交给搜索/评分按全局分数权衡，避免过度防守。
+    // 常规攻防：己方活三（进攻优先）与防守反击选点
     const threat = resolveThreats(me, opp, false, false);
     if (threat) return threat;
-    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）。
-    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定式。
+    // 开局库（盘面 ≤8 子）
     const book = bookMove(level, me);
     if (book) return book;
-    // 启发式开局策略（0~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）
+    // 启发式开局策略（0~8 子兜底）
     if (me === aiColor) {
       const o = openingMove(level);
       if (o) return o;
     }
   }
-  if (level === LEVEL_HARD) return bestBySearch(me, opp, level);
-  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索，
-  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展
-  if (level === LEVEL_MEDIUM) return bestBySearch(me, opp, level, MEDIUM_SEARCH_BUDGET_MS, MEDIUM_SEARCH_DEPTH);
-  return bestByScore(me, opp, level);
+  // 中等档：在威胁分层之上叠加浅搜索（预算内已由增量评估提速，同样时间看得更深）
+  return bestBySearch(me, opp, level, MEDIUM_SEARCH_BUDGET_MS, MEDIUM_SEARCH_DEPTH);
 }
 
 /**
@@ -783,6 +1192,17 @@ function bestByScore(me = aiColor, opp = playerColor, level) {
 
 /** 假设在 (r, c) 放一颗 color 棋，四个方向连子得分之和（含组合加权） */
 function evaluateCell(r, c, color) {
+  // 强度改造：空位读增量表（= 四方向棋型分之和），省掉每个候选点的 4 次 lineInfo
+  if (evalReady && board[r][c] === EMPTY) {
+    let total = cgSum[color - 1][r * boardSize + c];
+    if (total >= LIVE_THREE_SCORE * 2) total *= 2;
+    return total;
+  }
+  return evaluateCellRef(r, c, color);
+}
+
+/** 单点启发式参考实现（增量表未就绪或点上有子时使用） */
+function evaluateCellRef(r, c, color) {
   let total = 0;
   for (const [dr, dc] of DIRECTIONS) {
     total += directionScore(r, c, dr, dc, color);
@@ -861,6 +1281,13 @@ function lineScore(count, open, reachable) {
  * @returns {number} 0=普通落子 1=活三 2=冲四 3=活四 4=五连
  */
 function threatLevel(r, c, color) {
+  // 强度改造：空位直接读增量表（O(1)，旧实现每个节点要跑 4 次 lineInfo）
+  if (evalReady && board[r][c] === EMPTY) return cgLv[color - 1][r * boardSize + c];
+  return threatLevelRef(r, c, color);
+}
+
+/** 威胁等级参考实现（增量表未就绪、或查询点上已有棋子时使用，保持旧口径不变） */
+function threatLevelRef(r, c, color) {
   let best = 0;
   for (const [dr, dc] of DIRECTIONS) {
     const info = lineInfo(r, c, dr, dc, color);
@@ -878,29 +1305,25 @@ function threatLevel(r, c, color) {
  * 一步必杀检测：若在 (r, c) 放 color 能立刻成五则返回该点。
  * 用 canWinNow 直接数连子，不修改棋盘，速度比“临时落子再判胜”快得多。 */
 function findImmediateWin(color) {
-  // 成五点必然紧邻同色棋子（五连中除当前点外的 4 颗都在半径 1 内），
-  // 只查同色棋子相邻 8 格的空位即可，避免每个搜索节点全盘扫描 361 格。
-  const seen = new Set();
+  // 强度改造：直接读增量表（fiveCnt 为 0 时 O(1) 返回 null，旧实现每节点要扫全盘邻域）
+  if (!evalReady) ensureEvalState();
+  if (fiveCnt[color] === 0) return null;
+  const f = cgFive[color - 1];
   for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (canWinNow(nr, nc, color)) return [nr, nc];
-        }
-      }
-    }
+    const base = r * boardSize;
+    for (let c = 0; c < boardSize; c++) if (f[base + c]) return [r, c];
   }
   return null;
 }
 
 /** 快速判断：把 color 放在 (r, c) 后是否形成五连（不修改棋盘） */
 function canWinNow(r, c, color) {
+  if (evalReady && board[r][c] === EMPTY) return cgFive[color - 1][r * boardSize + c] !== 0;
+  return canWinNowRef(r, c, color);
+}
+
+/** canWinNow 的参考实现（直接数连子，不修改棋盘） */
+function canWinNowRef(r, c, color) {
   for (const [dr, dc] of DIRECTIONS) {
     let count = 1;
     for (const dir of [1, -1]) {
@@ -1025,39 +1448,67 @@ function resolveThreats(me = aiColor, opp = playerColor, skipOwnAttack, blockRus
 }
 
 /**
+ * 把常规候选（启发式前 limit 名）按分数降序写入 out[start...)，返回写入个数。
+ * 强度改造：不再用 Set 去重扫描“棋子周围 HINT_RADIUS 格”，改为 near2 计数过滤
+ * （切比雪夫距离 ≤2 内有子的空位，与旧口径完全一致）；评分全部读增量表，O(1)。
+ * 采用插入式 top-K：不做整表排序、不产生临时数组（深搜热点，每节点都会调用）。
+ */
+function fillCandidateMoves(out, start, limit, color) {
+  const me = color || aiColor;
+  const opp = me === BLACK ? WHITE : BLACK;
+  const sMe = me - 1, sOpp = opp - 1;
+  const lvMe = cgLv[sMe], thrMe = cgThr[sMe];
+  const sumMe = cgSum[sMe], sumOpp = cgSum[sOpp];
+  const n = boardSize * boardSize;
+  if (!scoreScratch || scoreScratch.length < limit) scoreScratch = new Float64Array(Math.max(limit, 64));
+  const scores = scoreScratch;
+  let cnt = 0;
+  for (let i = 0; i < n; i++) {
+    if (near2[i] === 0) continue;
+    const r = (i / boardSize) | 0;
+    if (board[r][i - r * boardSize] !== EMPTY) continue;
+    const s = scoreOfIdx(i, sumMe, sumOpp, lvMe, thrMe);
+    if (cnt === limit && s <= scores[cnt - 1]) continue;
+    let p = cnt < limit ? cnt : limit - 1;
+    while (p > 0 && scores[p - 1] < s) {
+      scores[p] = scores[p - 1];
+      out[start + p] = out[start + p - 1];
+      p--;
+    }
+    scores[p] = s;
+    out[start + p] = i;
+    if (cnt < limit) cnt++;
+  }
+  return cnt;
+}
+
+/** 候选点启发分（与旧 scoreFor + 强制手/双威胁加权完全一致） */
+function scoreOfIdx(i, sumMe, sumOpp, lvMe, thrMe) {
+  let sm = sumMe[i];
+  if (sm >= LIVE_THREE_SCORE * 2) sm *= 2;
+  let so = sumOpp[i];
+  if (so >= LIVE_THREE_SCORE * 2) so *= 2;
+  return sm + so * 0.8 + lvMe[i] * 8000 + (thrMe[i] >= 2 ? 16000 : 0);
+}
+
+/**
  * 生成候选落点：只收集“已有棋子周围 HINT_RADIUS 格内”的空位，
  * 再按启发式得分降序取前 limit 个。
- * 理由：远离棋子的落点在开局阶段几乎无意义，裁剪可大幅缩小搜索树。 */
+ * 理由：远离棋子的落点在开局阶段几乎无意义，裁剪可大幅缩小搜索树。
+ * @returns {Array<Array<number>>} [[r, c], ...]（按分数降序）
+ */
 function getCandidateMoves(limit, color) {
-  const seen = new Set();
-  const list = [];
-  const opp = color === BLACK ? WHITE : BLACK;
-
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] === EMPTY) continue;
-      for (let dr = -HINT_RADIUS; dr <= HINT_RADIUS; dr++) {
-        for (let dc = -HINT_RADIUS; dc <= HINT_RADIUS; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          list.push([nr, nc]);
-        }
-      }
-    }
+  if (!evalReady) ensureEvalState();
+  const lim = limit > 0 ? limit : CANDIDATE_LIMIT;
+  if (!candScratch || candScratch.length < lim) candScratch = new Int32Array(Math.max(lim, 64));
+  const cnt = fillCandidateMoves(candScratch, 0, lim, color);
+  const res = [];
+  for (let k = 0; k < cnt; k++) {
+    const i = candScratch[k];
+    const r = (i / boardSize) | 0;
+    res.push([r, i - r * boardSize]);
   }
-
-  const scored = list.map(([r, c]) => {
-    // 强制走法（能形成冲四/活四的点）排最前：搜索先验证关键点，剪枝更有效
-    const forcing = color ? threatLevel(r, c, color) * 8000 : 0;
-    // 双杀候选（一手形成两个活三以上威胁）再加权：优先探索必胜路线
-    const doubleThreat = color && countThreats(r, c, color) >= 2 ? 16000 : 0;
-    return { r, c, s: scoreFor(r, c, color, opp) + forcing + doubleThreat };
-  });
-  scored.sort((a, b) => b.s - a.s);   // 降序：高分候选在前，剪枝更有效
-  return scored.slice(0, limit).map(({ r, c }) => [r, c]);
+  return res;
 }
 
 /**
@@ -1071,82 +1522,34 @@ function getCandidateMoves(limit, color) {
  * 能延伸成活四的选点多的一方更主动；对方威胁空间越大，越不能安心进攻。
  * 与 comboBonus 的分工：comboBonus 只奖励“一手双威胁”的杀招点，这里把
  * 普通单线威胁也算进来，让叶节点评估不再只盯着必杀点、有全局大局观。
- * 数量上限 cap 控制评估开销（minimax 叶节点调用非常频繁）。 */
+ * 强度改造后由增量表维护（spaceSum），O(1) 读取；参数 cap 仅为兼容旧签名保留
+ * ——旧实现用它把每叶节点的扫描限制在 48 个点，新实现根本不做扫描。 */
 function threatSpaceBonus(color, cap = 48) {
-  let bonus = 0;
-  let checked = 0;
-  const seen = new Set();
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (++checked > cap) return bonus;
-          const lv = threatLevel(nr, nc, color);
-          if (lv >= 1) bonus += [0, 600, 2000, 15000, 80000][lv];
-        }
-      }
-    }
-  }
-  return bonus;
+  if (!evalReady) ensureEvalState();
+  return spaceSum[color];
 }
 
 /**
  * 局面评估：己方全部棋型分 − 对方全部棋型分×1.1，另加连接性、中心权重、
- * 双威胁组合分与“威胁空间”分（见 threatSpaceBonus）。
+ * 双威胁组合分与“威胁空间”分。
+ * 强度改造（P0）：全部改为读增量表（O(1)），替代旧实现每个叶节点的
+ * “全盘 361×4 次 lineInfo + 128 次 countThreats + 双方各 48 次 threatLevel”。
+ * 数值口径与旧实现一致：
+ *   lineSum  各色连线棋型分之和（按连续段起点计一次）
+ *   adjSum   四邻同色连接数之和        posSum  中心权重之和
+ *   dblCnt   一手双威胁点数            spaceSum 威胁空间加权和
  * @param {number} [comboWeight] 双威胁/威胁空间分的折扣系数：AI 决策用 1；
- *        胜率估算用 0.25，避免“双三/活三延伸”这类强而不必胜的棋型把胜率推过高。 */
+ *        胜率估算用 0.25，避免“双三/活三延伸”这类强而不必胜的棋型把胜率推过高。
+ */
 function evaluateBoard(me = aiColor, opp = playerColor, comboWeight = 1, tempoFor = null) {
-  let aiScore = 0;
-  let playerScore = 0;
-  let aiAdj = 0;
-  let playerAdj = 0;
-  const center = (boardSize - 1) / 2;
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      const color = board[r][c];
-      if (color === EMPTY) continue;
-      for (const [dr, dc] of DIRECTIONS) {
-        // 只统计这条连线的起点（r-dr, c-dc 不是同色子），一行只计一次
-        const pr = r - dr, pc = c - dc;
-        if (inBoard(pr, pc) && board[pr][pc] === color) continue;
-        const info = lineInfo(r, c, dr, dc, color);
-        const s = lineScore(info.count, info.open, info.reachable);
-        if (color === me) aiScore += s;
-        else playerScore += s;
-      }
-      // 连接性：与同色相邻的子数（鼓励进攻抱团，避免单子乱飞）
-      let adj = 0;
-      for (const [dr, dc] of DIRECTIONS) {
-        const nr = r + dr, nc = c + dc;
-        if (inBoard(nr, nc) && board[nr][nc] === color) adj++;
-      }
-      // 中心位置权重：越靠近天元，向四周展开的空间越大（大局观）
-      const dist = Math.abs(r - center) + Math.abs(c - center);
-      const posW = boardSize - dist;
-      if (color === me) { aiAdj += adj; aiScore += posW * CENTER_WEIGHT; }
-      else { playerAdj += adj; playerScore += posW * CENTER_WEIGHT; }
-    }
-  }
-  // comboWeight：默认 1（AI 决策用，双三=强杀招）；胜率估算时传入折扣系数，
-  // 让“双三候选”这类强而不必胜的棋型不至于把胜率推到 98% 的封顶值。
-  aiScore += comboBonus(me) * comboWeight;
-  playerScore += comboBonus(opp) * comboWeight;
-  // 威胁空间：双方各有多少个“一手成活三以上”的选点（进攻灵活度/对方反击空间）。
-  // 双威胁杀招由 comboBonus 单独计，这里只补单线威胁，避免重复；对方威胁空间
-  // 同样×1.1，让 AI 进攻时始终把对手的反击空间考虑进去（全局大局观）。
-  const aiSpace = threatSpaceBonus(me) * comboWeight;
-  const playerSpace = threatSpaceBonus(opp) * comboWeight;
-  const raw = (aiScore + aiAdj * CONNECT_BONUS + aiSpace)
-            - (playerScore + playerAdj * CONNECT_BONUS + playerSpace) * 1.1;
-  // 先手权（tempo）修正：轮到谁走，谁有先行展开权。双方各有一个活三时
-  // 静态棋型分完全一样，但先手方下一手就能把活三变活四锁定胜局——
-  // 不修正会让浅层搜索严重误判这类“先手决定胜负”的局面。
+  if (!evalReady) ensureEvalState();
+  const aiScore = lineSum[me] + adjSum[me] * CONNECT_BONUS + posSum[me] * CENTER_WEIGHT
+                + (dblCnt[me] * DOUBLE_THREAT_BONUS + spaceSum[me]) * comboWeight;
+  const playerScore = lineSum[opp] + adjSum[opp] * CONNECT_BONUS + posSum[opp] * CENTER_WEIGHT
+                + (dblCnt[opp] * DOUBLE_THREAT_BONUS + spaceSum[opp]) * comboWeight;
+  // 防守权重略高（1.1）：让 AI 攻防取舍时稍微偏保守（与旧实现一致）。
+  // 先手权（tempo）修正：轮到谁走谁有先行展开权，同一局面下先手方评估更高。
+  const raw = aiScore - playerScore * 1.1;
   if (tempoFor === me) return raw + TEMPO_BONUS;
   if (tempoFor === opp) return raw - TEMPO_BONUS;
   return raw;
@@ -1157,31 +1560,23 @@ function evaluateBoard(me = aiColor, opp = playerColor, comboWeight = 1, tempoFo
  * 对方一步只能堵一处，是极难防守的杀棋。只扫描“己方棋子相邻”的空位，
  * 并设数量上限，控制评估开销（否则 minimax 叶节点会明显变慢）。 */
 function comboBonus(color) {
-  let bonus = 0, checked = 0;
-  const seen = new Set();
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (++checked > 128) return bonus;
-          if (countThreats(nr, nc, color) >= 2) bonus += DOUBLE_THREAT_BONUS;
-        }
-      }
-    }
-  }
-  return bonus;
+  // 强度改造：dblCnt 由增量表维护（"一手形成两个活三以上威胁"的空位数），
+  // 旧实现每个叶节点要扫 128 个邻域点、每点 4 次 lineInfo。
+  if (!evalReady) ensureEvalState();
+  return dblCnt[color] * DOUBLE_THREAT_BONUS;
 }
 
 /**
  * 统计在 (r, c) 放 color 后，四个方向中“有效威胁”（活三及以上：
  * 活三/冲四/活四/五连）的数量。威胁数 >= 2 意味着对方一手无法同时处理。 */
 function countThreats(r, c, color) {
+  // 强度改造：空位读增量表（O(1)），旧实现每个节点要跑 4 次 lineInfo
+  if (evalReady && board[r][c] === EMPTY) return cgThr[color - 1][r * boardSize + c];
+  return countThreatsRef(r, c, color);
+}
+
+/** 有效威胁方向数的参考实现（增量表未就绪或点上有子时使用） */
+function countThreatsRef(r, c, color) {
   let n = 0;
   for (const [dr, dc] of DIRECTIONS) {
     const info = lineInfo(r, c, dr, dc, color);
@@ -1192,292 +1587,457 @@ function countThreats(r, c, color) {
 }
 
 /**
- * 初始化搜索加速表（置换表 + 历史启发）。
- * 每次 bestBySearch 开始时调用：重建棋盘哈希、清空置换表，保证
- * 哈希随机底数与棋盘状态一致（棋盘可能因前一手落子而变化）。 */
+ * 初始化搜索加速表（64 位置换表 + 历史启发 + 杀手手）。
+ * 每次 bestBySearch 开始时调用：重建棋盘哈希、开新一代置换表（代龄淘汰，
+ * 不再整表 clear，跨手积累得以保留）、衰减历史分、清空杀手手。
+ * 同时对齐增量评估状态（外部可能直接改写过棋盘）。
+ */
 function initSearchTables() {
   if (!ttZobrist) {
-    // 首次生成 Zobrist 随机底数：每个 (位置, 颜色) 一个 32 位随机整数。
+    // 首次生成 Zobrist 随机底数：每个 (位置, 颜色) 两个 32 位随机整数（64 位哈希）。
     // 按 19×19 固定尺寸；13/15 棋盘只使用左上部分，不影响哈希正确性。
     ttZobrist = [];
     for (let r = 0; r < 19; r++) {
       ttZobrist[r] = [];
       for (let c = 0; c < 19; c++) {
         ttZobrist[r][c] = [
-          (Math.random() * 0xFFFFFFFF) | 0,
-          (Math.random() * 0xFFFFFFFF) | 0
+          (Math.random() * 0xFFFFFFFF) | 0, (Math.random() * 0xFFFFFFFF) | 0,
+          (Math.random() * 0xFFFFFFFF) | 0, (Math.random() * 0xFFFFFFFF) | 0,
         ];
       }
     }
   }
-  // 跨步置换表：ttMap / historyTable / killerTable 在整局内跨落子持续复用。
-  // 相同局面（含“轮到谁”与搜索视角）的搜索结果直接复用，后续每一步都能
-  // 吃到前几步搜索积累的缓存，同一预算下看得更深。哈希随机底数只在首次
-  // 生成、整页稳定；ttStore 在条目超上限时会整体清空，内存有界。
   if (!ttMap) ttMap = new Map();
-  if (!historyTable) historyTable = [new Int32Array(361), new Int32Array(361)];
-  if (!killerTable) killerTable = Array.from({ length: 12 }, () => [null, null]);
-  boardHash = 0;
+  const n = boardSize * boardSize;
+  if (!historyTable || historyTable[0].length !== n) {
+    historyTable = [new Int32Array(n), new Int32Array(n)];
+  } else {
+    for (let s = 0; s < 2; s++) {
+      const h = historyTable[s];
+      for (let i = 0; i < n; i++) if (h[i]) h[i] >>= 1;   // 跨手衰减，避免历史分固化
+    }
+  }
+  if (!killerTable || killerTable.length < 64) {
+    killerTable = Array.from({ length: 64 }, () => [-1, -1]);
+  } else {
+    for (let i = 0; i < killerTable.length; i++) { killerTable[i][0] = -1; killerTable[i][1] = -1; }
+  }
+  if (!movePool) movePool = new Int32Array(MOVE_POOL_SIZE);
+  movePoolPtr = 0;
+  // 棋盘哈希按当前棋盘重建（外部可能直接改写过棋盘）
+  boardHashLo = 0;
+  boardHashHi = 0;
   for (let r = 0; r < boardSize; r++) {
     for (let c = 0; c < boardSize; c++) {
       if (board[r][c] !== EMPTY) hashXor(r, c, board[r][c]);
     }
   }
+  boardHash = boardHashLo >>> 0;
+  ttGen++;
 }
 
-/** 把 (r,c) 处的 color 棋从棋盘哈希中异或进/出（落子与悔棋各调用一次） */
+/** 把 (r,c) 处的 color 棋从 64 位棋盘哈希中异或进/出（落子与悔棋各调用一次） */
 function hashXor(r, c, color) {
   if (!ttZobrist) return;
-  boardHash ^= ttZobrist[r][c][color === BLACK ? 0 : 1];
+  const z = ttZobrist[r][c];
+  const o = color === BLACK ? 0 : 2;
+  boardHashLo ^= z[o];
+  boardHashHi ^= z[o + 1];
+  boardHash = boardHashLo >>> 0;
 }
 
-/** 写置换表：窗口过窄会存 LOWER/UPPER，完整搜索存 EXACT */
-function ttStore(key, depth, flag, val) {
-  if (!ttMap) return;
-  if (ttMap.size >= TT_MAX_ENTRIES) ttMap.clear();   // 超上限直接清空，简单防内存膨胀
-  ttMap.set(key, { depth, flag, val });
+/** 置换表键：64 位棋盘哈希 + 行棋方混合成 53 位安全整数（同时含"轮到谁"信息） */
+function ttKeyOf(color) {
+  const hi = (boardHashHi ^ (color === BLACK ? TT_PERSP_BLACK : TT_PERSP_WHITE)) >>> 0;
+  const lo = (boardHashLo ^ (color === BLACK ? TT_SIDE_ME : TT_SIDE_OPP)) >>> 0;
+  return hi * 2097152 + (lo >>> 11);
 }
 
 /**
- * Alpha-Beta 剪枝搜索（困难档核心）。
- * 思路：轮流假设 AI（取最大）与玩家（取最小）落子，向前看 searchDepth 决定的层数，
- * 用 alpha/beta 剪掉不可能影响结果的子树；配合置换表（缓存重复局面）与
- * 历史启发（好手优先尝试），同一预算能搜得更深。超预算时截断为静态评估。 */
-function minimax(depth, alpha, beta, isMax, me = aiColor, opp = playerColor) {
-  // 超时保护：预算耗尽后直接返回静态评估，保证 19 路棋盘下不卡顿
-  if (searchState && performance.now() - searchState.t0 > searchState.budget) {
-    return evaluateBoard(me, opp, 1, isMax ? me : opp);
+ * 写置换表：窗口过窄会存 LOWER/UPPER，完整搜索存 EXACT。
+ * 同一代内保留更深的条目；表满时按代龄淘汰旧条目（而不是整表清空，
+ * 旧实现的 clear() 会把整局积累一次性丢掉）。
+ */
+function ttStore(key, depth, flag, val) {
+  if (!ttMap) return;
+  if (ttMap.size >= TT_MAX_ENTRIES) {
+    const keepFrom = ttGen - TT_SWEEP_KEEP_GENS;
+    for (const [k, e] of ttMap) if (e.g < keepFrom) ttMap.delete(k);
+    if (ttMap.size >= TT_MAX_ENTRIES) ttMap.clear();
   }
-  // 置换表查表：同一局面（含“轮到谁”“搜索视角”）的搜索结果直接复用。
-  // 迭代加深会反复展开同一局面，命中后能省掉整棵子树的重算。
-  // 视角 XOR：评估分以 me 为正（AI 执黑与教学推荐玩家时的正负方向相反），
-  // 不加视角会把两个方向的分数混用导致误判；加上后两者各自独立缓存。
-  const ttKey = boardHash ^ (isMax ? TT_SIDE_ME : TT_SIDE_OPP)
-              ^ (me === BLACK ? TT_PERSP_BLACK : TT_PERSP_WHITE);
-  const entry = ttMap && ttMap.get(ttKey);
-  if (entry && entry.depth >= depth) {
-    if (entry.flag === TT_EXACT) return entry.val;
-    if (entry.flag === TT_LOWER && entry.val >= beta) return entry.val;
-    if (entry.flag === TT_UPPER && entry.val <= alpha) return entry.val;
-  }
-  const alphaOrig = alpha;
-  const betaOrig = beta;
-  // 任一方向存在一步成五 → 立即返回必胜/必败分，无需继续搜索
-  if (findImmediateWin(me)) return WIN_SCORE;
-  if (findImmediateWin(opp)) return -WIN_SCORE;
-  if (depth === 0) return evaluateBoard(me, opp, 1, isMax ? me : opp);
+  const old = ttMap.get(key);
+  if (old !== undefined && old.g === ttGen && old.d > depth) return;
+  ttMap.set(key, { d: depth, f: flag, v: val, g: ttGen });
+}
 
-  // ===== 威胁感知的候选生成（强制走法剪枝） =====
-  // 五子棋的胜负由“活四/冲四”这类强制威胁驱动：一旦某方存在冲四级威胁，
-  // 对方只能被迫回应。因此在搜索节点先判断双方威胁，把候选收窄到：
-  //   ① 对方可一手成活四/成五 → 必须优先堵（除非自己能抢先活四/成五）；
-  //   ② 自己能形成冲四级威胁 → 只搜这些强制点（等于把 VCF 思路融进搜索，
-  //      分支数从十几个降到几个，同一预算下能顺着杀棋链多看 2~3 层）；
-  //   ③ 否则才回落到常规候选（棋子周围 radius 2 内的启发式选点）。
-  const side = isMax ? me : opp;                // 本节点行动方
-  const oppSide = isMax ? opp : me;             // 对方下一步行动方
-  const myDanger = forcingMovesOf(side, 3);     // 自己一手成活四/成五的点
-  const oppDanger = forcingMovesOf(oppSide, 3); // 对方一手成活四/成五的点
-  let moves;
-  if (oppDanger.length && !myDanger.length) {
-    moves = oppDanger;                          // 对方威胁更急：必须先堵
-  } else if (myDanger.length) {
-    moves = myDanger;                           // 自己能活四/成五：无解进攻优先
+/**
+ * 威胁驱动的着法生成：按“必杀 → 必挡 → 活四 → 双威胁 → 常规候选”收窄分支。
+ * 分支收窄是五子棋能搜深的前提——旧实现每个节点要跑 2~3 次全盘强制手扫描
+ * （每次都是"每个棋子周围 25 格 × threatLevel"），开销比真正搜索还大。
+ * 着法写入共享着法池 movePool，返回个数；调用方负责在递归返回后回收 movePoolPtr。
+ * @returns {number} 着法个数（着法为落点一维下标）
+ */
+function generateMoves(color) {
+  const start = movePoolPtr;
+  const opp = color === BLACK ? WHITE : BLACK;
+  const sMe = color - 1, sOpp = opp - 1;
+  const n = boardSize * boardSize;
+  // ① 自己能一手成五 → 只需搜这些点（必胜，取任意一个）
+  if (fiveCnt[color] > 0) {
+    const f = cgFive[sMe];
+    for (let i = 0; i < n && movePoolPtr - start < MAX_MOVES_PER_NODE; i++) if (f[i]) movePool[movePoolPtr++] = i;
+    return movePoolPtr - start;
+  }
+  // ② 对方能一手成五 → 必须堵（自己已无一步成五）
+  if (fiveCnt[opp] > 0) {
+    const f = cgFive[sOpp];
+    for (let i = 0; i < n && movePoolPtr - start < MAX_MOVES_PER_NODE; i++) if (f[i]) movePool[movePoolPtr++] = i;
+    return movePoolPtr - start;
+  }
+  const lvMe = cgLv[sMe], lvOpp = cgLv[sOpp], thrMe = cgThr[sMe];
+  // ③ 己方活四/成五点：一手锁定胜局
+  for (let i = 0; i < n; i++) if (lvMe[i] >= 3) movePool[movePoolPtr++] = i;
+  if (movePoolPtr > start) return movePoolPtr - start;
+  // ④ 对方活四点：必须化解（占点或抢先做冲四/活四）
+  for (let i = 0; i < n; i++) if (lvOpp[i] >= 3) movePool[movePoolPtr++] = i;
+  if (movePoolPtr > start) return movePoolPtr - start;
+  // ⑤ 己方双威胁点（一手两个活三以上）：对方一手堵不完，是最强的慢杀起手
+  for (let i = 0; i < n; i++) if (thrMe[i] >= 2) movePool[movePoolPtr++] = i;
+  if (movePoolPtr > start) return movePoolPtr - start;
+  // ⑥ 常规候选（启发式排序后取前 CANDIDATE_LIMIT）
+  const cnt = fillCandidateMoves(movePool, start, CANDIDATE_LIMIT, color);
+  movePoolPtr = start + cnt;
+  return cnt;
+}
+
+/** 着法排序分：杀手手优先，其次历史启发 */
+function moveOrderScore(idx, hist, kl) {
+  if (idx === kl[0]) return 1e15;
+  if (idx === kl[1]) return 1e14;
+  return hist[idx];
+}
+
+/** 对刚生成的着法做稳定插入排序（杀手手 → 历史启发 → 原启发式顺序） */
+function orderMoves(start, cnt, color, ply) {
+  const hist = historyTable[color - 1];
+  const kl = killerTable[ply < 64 ? ply : 63];
+  for (let i = 1; i < cnt; i++) {
+    const idx = movePool[start + i];
+    const s = moveOrderScore(idx, hist, kl);
+    let j = i - 1;
+    while (j >= 0 && moveOrderScore(movePool[start + j], hist, kl) < s) {
+      movePool[start + j + 1] = movePool[start + j];
+      j--;
+    }
+    movePool[start + j + 1] = idx;
+  }
+}
+
+/** 记录杀手手（同一层引发剪枝的着法） */
+function recordKiller(ply, idx) {
+  const kl = killerTable[ply < 64 ? ply : 63];
+  if (kl[0] !== idx) { kl[1] = kl[0]; kl[0] = idx; }
+}
+
+/**
+ * 静止搜索（quiescence）：叶节点只延展"冲四级以上"的强制手（以及必须的挡点）。
+ * 这是本轮改造能否"让搜索接管战术阶梯"的关键——旧阶梯能看见的双三/VCF 慢杀，
+ * 只有靠强制手延展才能在静态评估之前被搜索看见（P0-2 曾因缺少这一环而 0:40 惨败）。
+ */
+function quiesce(alpha, beta, color, ply, qdepth) {
+  searchNodes++;
+  if ((searchNodes & 1023) === 0 && performance.now() > searchDeadline) searchAborted = true;
+  if (searchAborted) return 0;
+  const opp = color === BLACK ? WHITE : BLACK;
+  if (fiveCnt[color] > 0) return WIN_SCORE - ply;      // 该方下一手成五
+  const stand = evaluateBoard(color, opp, 1, color);   // stand-pat：不再强制手时的静态分
+  if (qdepth <= 0) return stand;
+  const sMe = color - 1, sOpp = opp - 1;
+  const n = boardSize * boardSize;
+  const mustBlock = fiveCnt[opp] > 0;
+  const start = movePoolPtr;
+  if (mustBlock) {
+    const f = cgFive[sOpp];
+    for (let i = 0; i < n && movePoolPtr - start < MAX_MOVES_PER_NODE; i++) if (f[i]) movePool[movePoolPtr++] = i;
   } else {
-    // 只有“一手形成双威胁”的冲四才是真正强制手（对方一手堵不完）；
-    // 单一冲四会被对方一手堵死，若强制只搜它，AI 会盲目冲四挥霍机会——
-    // 普通冲四放回常规候选（getCandidateMoves 仍按启发式把冲四点排得很前）。
-    const myForcing = forcingMovesOf(side, 2).filter(([r, c]) => countThreats(r, c, side) >= 2);
-    moves = myForcing.length ? myForcing : getCandidateMoves(CANDIDATE_LIMIT, side);
+    const lvMe = cgLv[sMe];
+    for (let i = 0; i < n && movePoolPtr - start < MAX_MOVES_PER_NODE; i++) if (lvMe[i] >= 2) movePool[movePoolPtr++] = i;
   }
-  moves = moves.slice(0, CANDIDATE_LIMIT);      // 仍然限宽，控制分支因子
-  // 历史启发：把此前“引发剪枝/拿到高分”的落点提前尝试，让剪枝更早发生。
-  // 开局阶段历史分全为 0，排序保持原启发式顺序（Array.sort 稳定）。
-  if (historyTable) {
-    const hArr = historyTable[side === BLACK ? 0 : 1];
-    moves.sort((a, b) => hArr[b[0] * 19 + b[1]] - hArr[a[0] * 19 + a[1]]);
+  const cnt = movePoolPtr - start;
+  if (cnt === 0) { movePoolPtr = start; return stand; }
+  let best = mustBlock ? -INF_SCORE : stand;           // 必须堵时不允许 stand-pat
+  for (let k = 0; k < cnt; k++) {
+    const idx = movePool[start + k];
+    const r = (idx / boardSize) | 0, c = idx - r * boardSize;
+    const isWin = cgFive[sMe][idx] !== 0;
+    enterMove(r, c, color);
+    const v = isWin ? WIN_SCORE - ply : -quiesce(-beta, -alpha, opp, ply + 1, qdepth - 1);
+    leaveMove(r, c, color);
+    if (searchAborted) { movePoolPtr = start; return 0; }
+    if (v > best) best = v;
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) break;
   }
-  // killer move：把“同剩余深度曾引发剪枝”的落点再提到历史排序之前（标准杀手启发，
-  // 比历史启发更“当下”——同一深度的不同分支大概率共享同一步好棋）。只调整既有
-  // 候选的顺序、不新增落点，因此强制走法列表也不会被破坏。
-  if (killerTable && killerTable[depth]) {
-    for (let k = 0; k < 2; k++) {
-      const km = killerTable[depth][k];
-      if (!km) continue;
-      const ki = moves.findIndex(mv => mv[0] === km[0] && mv[1] === km[1]);
-      if (ki > 0) { moves.splice(ki, 1); moves.unshift([km[0], km[1]]); }
+  movePoolPtr = start;
+  return best;
+}
+
+/**
+ * Negamax + Alpha-Beta + PVS + 置换表 + 杀手/历史启发，分值一律"以当前行动方为视角"。
+ * 必胜/必败用 WIN_SCORE - ply 表示（越早赢越好、越晚输越好）——旧实现不管多少步后
+ * 取胜都返回同一个 WIN_SCORE，导致"该收杀时不收、该拖时不拖"。
+ */
+function negamax(depth, alpha, beta, color, ply) {
+  searchNodes++;
+  if ((searchNodes & 1023) === 0 && performance.now() > searchDeadline) searchAborted = true;
+  if (searchAborted) return 0;
+  const opp = color === BLACK ? WHITE : BLACK;
+  const key = ttKeyOf(color);
+  const e = ttMap.get(key);
+  if (e !== undefined && e.d >= depth) {
+    if (e.f === TT_EXACT) return e.v;
+    if (e.f === TT_LOWER && e.v >= beta) return e.v;
+    if (e.f === TT_UPPER && e.v <= alpha) return e.v;
+  }
+  if (fiveCnt[color] > 0) return WIN_SCORE - ply;      // 该方下一手成五
+  if (depth <= 0) return quiesce(alpha, beta, color, ply, QUIESCE_MAX_PLIES);
+  const alphaOrig = alpha;
+  const start = movePoolPtr;
+  const cnt = generateMoves(color);
+  if (cnt === 0) { movePoolPtr = start; return evaluateBoard(color, opp, 1, color); }
+  orderMoves(start, cnt, color, ply);
+  let best = -INF_SCORE;
+  let bestMove = -1;
+  for (let k = 0; k < cnt; k++) {
+    const idx = movePool[start + k];
+    const r = (idx / boardSize) | 0, c = idx - r * boardSize;
+    const isWin = cgFive[color - 1][idx] !== 0;
+    enterMove(r, c, color);
+    let v;
+    if (isWin) {
+      v = WIN_SCORE - ply;
+    } else if (k === 0) {
+      v = -negamax(depth - 1, -beta, -alpha, opp, ply + 1);
+    } else {
+      // PVS：先用零宽窗口试探，只有落在窗口内才重新全窗口搜索
+      v = -negamax(depth - 1, -alpha - 1, -alpha, opp, ply + 1);
+      if (v > alpha && v < beta && !searchAborted) v = -negamax(depth - 1, -beta, -alpha, opp, ply + 1);
     }
-  }
-  if (moves.length === 0) { ttStore(ttKey, depth, TT_EXACT, 0); return 0; }  // 无子可下（平局）
-  if (isMax) {                                       // 我方回合：取最大
-    let best = -Infinity;
-    for (const [r, c] of moves) {
-      board[r][c] = me;
-      hashXor(r, c, me);
-      const v = minimax(depth - 1, alpha, beta, false, me, opp);
-      hashXor(r, c, me);
-      board[r][c] = EMPTY;
-      if (v > best) best = v;
-      if (v > alpha) alpha = v;
-      if (beta <= alpha) {                           // 剪枝：这手证明有效，历史加分并记入杀手表
-        if (historyTable) historyTable[0][r * 19 + c] += depth * depth;
-        if (killerTable && killerTable[depth]) {
-          const kl = killerTable[depth];
-          if (!(kl[0] && kl[0][0] === r && kl[0][1] === c)) { kl[1] = kl[0]; kl[0] = [r, c]; }
-        }
-        break;
+    leaveMove(r, c, color);
+    if (searchAborted) { movePoolPtr = start; return 0; }
+    if (v > best) { best = v; bestMove = idx; }
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) {
+      if (bestMove >= 0) {
+        recordKiller(ply, bestMove);
+        historyTable[color - 1][bestMove] += depth * depth;
       }
+      break;
     }
-    ttStore(ttKey, depth, best <= alphaOrig ? TT_UPPER : (best >= betaOrig ? TT_LOWER : TT_EXACT), best);
-    return best;
-  } else {                                           // 对方回合：取最小
-    let best = Infinity;
-    for (const [r, c] of moves) {
-      board[r][c] = opp;
-      hashXor(r, c, opp);
-      const v = minimax(depth - 1, alpha, beta, true, me, opp);
-      hashXor(r, c, opp);
-      board[r][c] = EMPTY;
-      if (v < best) best = v;
-      if (v < beta) beta = v;
-      if (beta <= alpha) {                           // 剪枝：对方这手让己方无望，同样加分并记入杀手表
-        if (historyTable) historyTable[1][r * 19 + c] += depth * depth;
-        if (killerTable && killerTable[depth]) {
-          const kl = killerTable[depth];
-          if (!(kl[0] && kl[0][0] === r && kl[0][1] === c)) { kl[1] = kl[0]; kl[0] = [r, c]; }
-        }
-        break;
-      }
-    }
-    ttStore(ttKey, depth, best <= alphaOrig ? TT_UPPER : (best >= betaOrig ? TT_LOWER : TT_EXACT), best);
-    return best;
   }
+  movePoolPtr = start;
+  ttStore(key, depth, best <= alphaOrig ? TT_UPPER : (best >= beta ? TT_LOWER : TT_EXACT), best);
+  return best;
+}
+
+/**
+ * Alpha-Beta 搜索（保留旧签名与"以 me 为正"的分值口径，供外部工具/测试继续调用）。
+ * 内部实现已换成 Negamax + PVS + 静止搜索，见 negamax/quiesce。
+ */
+function minimax(depth, alpha, beta, isMax, me = aiColor, opp = playerColor) {
+  const color = isMax ? me : opp;
+  const v = negamax(depth, alpha, beta, color, 0);
+  return isMax ? v : -v;
+}
+
+/** 该颜色是否存在 level 级以上的威胁点（O(棋盘格数)，仅用于根节点的"别送招"校验） */
+function maxLevelExists(color, lv) {
+  const a = cgLv[color - 1];
+  for (let i = 0; i < a.length; i++) if (a[i] >= lv) return true;
+  return false;
+}
+
+/**
+ * “不送招”校验：这一步会不会凭空送给对方成五点/活四点。
+ * 深层搜索偶尔会为了抢攻而漏防，这里是针对最致命失误的廉价保险。
+ */
+function moveIsSafe(idx, me, opp) {
+  if (cgFive[me - 1][idx]) return true;            // 自己一手成五
+  if (cgLv[me - 1][idx] >= 3) return true;         // 自己成活四，对方一手挡不住
+  const beforeFive = fiveCnt[opp] > 0;
+  const beforeL4 = !beforeFive && maxLevelExists(opp, 3);
+  const r = (idx / boardSize) | 0, c = idx - r * boardSize;
+  enterMove(r, c, me);
+  const afterFive = fiveCnt[opp] > 0;
+  const afterL4 = !afterFive && maxLevelExists(opp, 3);
+  leaveMove(r, c, me);
+  if (afterFive && !beforeFive) return false;
+  if (afterL4 && !beforeL4) return false;
+  return true;
+}
+
+/**
+ * 根候选：常规启发式候选 + 双方战术点（保证必挡点不会被候选宽度截断），
+ * 再过滤掉"会立刻送对手五连/活四"的着法（除非全部都不安全）。
+ * @returns {Array<number>} 落点一维下标
+ */
+function collectRootMoves(me, opp) {
+  if (!evalReady) ensureEvalState();
+  const n = boardSize * boardSize;
+  const lvMe = cgLv[me - 1], lvOpp = cgLv[opp - 1];
+  const seen = new Uint8Array(n);
+  const res = [];
+  const push = (i) => {
+    if (i < 0 || i >= n || seen[i]) return;
+    const r = (i / boardSize) | 0;
+    if (board[r][i - r * boardSize] !== EMPTY) return;
+    seen[i] = 1;
+    res.push(i);
+  };
+  for (let i = 0; i < n; i++) if (lvMe[i] >= 2) push(i);    // 己方冲四以上
+  for (let i = 0; i < n; i++) if (lvOpp[i] >= 2) push(i);   // 对方冲四以上（必挡点）
+  if (!candScratch || candScratch.length < ROOT_CANDIDATE_LIMIT) candScratch = new Int32Array(64);
+  const cnt = fillCandidateMoves(candScratch, 0, ROOT_CANDIDATE_LIMIT, me);
+  for (let k = 0; k < cnt; k++) push(candScratch[k]);
+  const safe = [];
+  for (let k = 0; k < res.length; k++) if (moveIsSafe(res[k], me, opp)) safe.push(res[k]);
+  return safe.length ? safe : res;
+}
+
+/**
+ * 困难档决策：只保留“可证明”的短路（一步成五 / 必挡五 / 己方 VCF 连杀 /
+ * 对方 VCF 必堵 / 对方 VCT 必堵），其余全部交给 8~12 层深搜裁决。
+ *
+ * 旧实现把 11 级单步战术阶梯放在搜索之前短路返回，导致 83% 的着法根本不经搜索、
+ * 参数旋钮全部失效（见仓库历史：12 项参数级改动全部持平）。本轮把阶梯降级为
+ * “候选注入 + 排序提示”（由 collectRootMoves 保证必挡点进候选），决策权交还搜索。
+ */
+function hardMove(me, opp) {
+  const win = findImmediateWin(me);
+  if (win) return win;
+  const block = findImmediateWin(opp);
+  if (block) return block;
+  const vcf = findVcfWin(me, VCF_MAX_PLIES);          // 己方连续冲四杀：已证明的强制胜
+  if (vcf) return vcf;
+  if (findVcfWin(opp, VCF_MAX_PLIES)) {               // 对方连续冲四杀：必须先堵
+    const t = resolveThreats(me, opp, true);
+    if (t) return t;
+  }
+  const oppVct = findVctWin(opp);                     // 对方活三链杀：搜索深度不足以覆盖，单独挡
+  lastVctPath = null;                                 // 对方杀棋路径只用于决策，不作为教学展示
+  if (oppVct) {
+    const d = vctDefense(opp);
+    if (d) return d;
+  }
+  // 开局阶段（≤ OPENING_BOOK_MAX_STONES 子）仍走开局库/定式：库是深度 3 自对弈生成的，
+  // 只在开局有参考价值，中盘以后一律交给搜索。
+  if (pieceCount <= OPENING_BOOK_MAX_STONES) {
+    const book = bookMove(LEVEL_HARD, me);
+    if (book) return book;
+    if (me === aiColor) {
+      const o = openingMove(LEVEL_HARD);
+      if (o) return o;
+    }
+  }
+  const m = bestBySearch(me, opp, LEVEL_HARD);
+  return m || bestByScore(me, opp, LEVEL_HARD);
 }
 
 /**
  * 收集 color 一步即可形成“冲四级以上威胁”（minLv=2 冲四 / minLv=3 活四 / 成五）的空位。
- * 用于强制走法搜索：这类点落子后对方必须回应，是五子棋的“强制手”。
+ * 强度改造：直接读增量表的 cgLv（O(棋盘格数) 次数组读取），
+ * 旧实现要对每个同色棋子周围 25 格逐个跑 threatLevel（4 次 lineInfo）。
  * @param {number} color 行动方颜色
  * @param {number} [minLv] 最低威胁等级（默认 2）
- * @returns {Array<Array<number>>} [r, c] 列表
+ * @returns {Array<Array<number>>} [r, c] 列表（按行优先顺序，确定性）
  */
 function forcingMovesOf(color, minLv = 2) {
+  if (!evalReady) ensureEvalState();
+  const lv = cgLv[color - 1];
   const pts = [];
-  const seen = new Set();
-  // 冲四/活四/成五的落点必然落在同色连线的 5 格窗口内，即紧邻同色棋子（半径 2 内）。
-  // 只扫描同色棋子周围 2 格的空位，把每个搜索节点的开销从“全盘 361 格 × threatLevel”
-  // 降到局部候选——这是困难档中后盘提速的关键（minimax 每个节点都要调两次）。
   for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -2; dr <= 2; dr++) {
-        for (let dc = -2; dc <= 2; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          // threatLevel 对“成五”返回 4，天然 >= minLv，无需单独调 canWinNow
-          if (threatLevel(nr, nc, color) >= minLv) pts.push([nr, nc]);
-        }
-      }
-    }
+    const base = r * boardSize;
+    for (let c = 0; c < boardSize; c++) if (lv[base + c] >= minLv) pts.push([r, c]);
   }
   return pts;
 }
 
 /**
- * 动态搜索深度：根据盘面棋子数自动加深层数，兼顾速度与“快点赢”。
- * 开局/中盘候选点多，保持 3 层保证响应速度（约 <1s）；
- * 中后盘与残局时棋子密集、候选点变少，搜索树天然缩小。
- * 借助置换表/历史启发压住重复展开后，可放心加深到 5~6 层，
- * 让 AI 看穿更长的杀棋链条，尽早兑现优势、避免拖到百步。
- * @returns {number} 本次搜索使用的深度 */
+ * 动态搜索深度上限：按盘面棋子数自动加深。
+ * 强度改造前的实现是 3/5/6 层——那是被"每节点上千次 lineInfo"的评估成本逼出来的；
+ * 增量棋型引擎把叶节点评估从 ~1500 次 lineInfo 降到 O(1) 之后，开局/中盘也能负担
+ * 8 层以上。真正的耗时控制由 bestBySearch 的迭代加深 + 时间预算负责（本函数只是上限）。
+ * @returns {number} 本次搜索的深度上限
+ */
 function searchDepth() {
-  let placed = 0;
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== EMPTY) placed++;
-    }
-  }
-  if (placed >= 60) return 6;   // 残局后期：候选点很少，可放心加深到 6 层
-  if (placed >= 35) return 5;   // 中后盘：候选点已收敛，加深两层尽早兑现优势
-  return 3;                     // 开局/中盘：候选点多，保持 3 层控制耗时
+  const placed = pieceCount;
+  if (placed >= 60) return 12;   // 残局后期：候选点很少，可放心加深
+  if (placed >= 35) return 10;   // 中后盘
+  return 8;                      // 开局/中盘
 }
 
-/** 困难档入口：在根节点对每个候选落子模拟一步，再递归搜索并选最优 */
 /**
- * 困难档搜索入口：迭代加深 + Alpha-Beta。
- * 先搜 3 层拿到基准结果，预算内继续加深到 5~6 层（searchDepth 按残局进度定上限）。
- * 时间不够就用已完成的最深一层结果；配合置换表与历史启发，同一预算能搜得更深。
+ * 困难档搜索入口：迭代加深 + Negamax/Alpha-Beta/PVS + 静止搜索。
+ * 时间管理：每层开始前预测"下一层是否放得下"（用本层耗时的 3 倍估算），
+ * 放不下就停；层内超预算则采用已完成部分中"优于上一层结果"的着法。
+ * 这样既不会"等满预算却只拿到浅层结果"，也不会在小局面白白空转。
  * @param {string} [level] 当前难度，仅用于兜底打分时的随机候选数
+ * @param {number} [budgetMs] 单步时间预算
+ * @param {number} [depthLimit] 深度上限（>0 时覆盖 searchDepth，中等档固定浅搜用）
+ * @returns {Array|null} [r, c]
  */
 function bestBySearch(me = aiColor, opp = playerColor, level, budgetMs = SEARCH_BUDGET_MS, depthLimit = 0) {
-  // 重建棋盘哈希（ttMap/historyTable/killerTable 跨步持续复用，见 initSearchTables）
+  // 重建棋盘哈希、开新一代置换表、对齐增量评估状态（ttMap 跨步复用，见 initSearchTables）
   initSearchTables();
-  // 根节点同样先做必杀检测（能赢立刻赢、该挡立刻挡）
+  // 根节点先做必杀检测（能赢立刻赢、该挡立刻挡）
   const aiWin = findImmediateWin(me);
   if (aiWin) return aiWin;
   const playerWin = findImmediateWin(opp);
   if (playerWin) return playerWin;
-  // 对方存在一手成双杀的隐患 → 先堵（无更强即时威胁时）
-  const oppDt = findOpponentDoubleThreat(opp);
-  if (oppDt) {
-    const urgent = resolveThreats(me, opp, true);
-    if (urgent) return urgent;
-    return oppDt;
-  }
 
-  searchState = { t0: performance.now(), budget: budgetMs };
-  // 根候选（启发式排序），并记录原始下标：跨步置换表会让“第二次搜索”更快、
-  // 更早知道更多必胜手，并列分数必须按原始候选顺序打破，结果才与缓存状态无关。
-  let ordered = getCandidateMoves(ROOT_CANDIDATE_LIMIT, me).map((m, i) => ({ r: m[0], c: m[1], idx: i }));
-  if (ordered.length === 0) return null;
+  const budget = budgetMs > 0 ? budgetMs : SEARCH_BUDGET_MS;
+  searchDeadline = performance.now() + budget;
+  searchAborted = false;
+  searchNodes = 0;
 
-  // 按残局进度自动加深（searchDepth），depthLimit>0 时封顶（中等档固定 3 层）
   const maxDepth = depthLimit > 0 ? Math.min(depthLimit, searchDepth()) : searchDepth();
-  const startDepth = Math.min(3, maxDepth);   // 至少从 3 层起搜
-  let bestMove = null;
-  let bestScore = -Infinity;
-  outer:
-  for (let depth = startDepth; depth <= maxDepth; depth++) {
-    // 分层时间盒：浅层保证完成，深层用剩余预算。深层超时立即采用“已完成/部分完成”
-    // 的结果——旧逻辑会把整个预算耗在做不完的深层上，等满预算却只拿到浅层结果。
-    const levelBudget = Math.max(150,
-      (searchState.budget - (performance.now() - searchState.t0)) / (maxDepth - depth + 1));
-    const levelStart = performance.now();
-    let dBest = null;
-    let dBestIdx = Infinity;
-    let dScore = -Infinity;
+  let ordered = collectRootMoves(me, opp);
+  if (ordered.length === 0) return bestByScore(me, opp, level);
+
+  let bestMove = -1;
+  let bestScore = -INF_SCORE;
+  for (let depth = Math.min(2, maxDepth); depth <= maxDepth; depth++) {
+    const itStart = performance.now();
+    let alpha = -INF_SCORE;
+    const beta = INF_SCORE;
     const scored = [];
-    let levelDone = true;
-    for (const { r, c, idx } of ordered) {
-      if (performance.now() - searchState.t0 > searchState.budget) { levelDone = false; break; }
-      if (performance.now() - levelStart > levelBudget) { levelDone = false; break; }
-      board[r][c] = me;
-      hashXor(r, c, me);           // 根节点也维护棋盘哈希，让置换表覆盖整棵子树
-      const v = minimax(depth - 1, -Infinity, Infinity, false, me, opp);
-      hashXor(r, c, me);
-      board[r][c] = EMPTY;
-      scored.push({ r, c, idx, v });
-      // 分数更高才换；同分取“原始候选顺序更靠前”的，保证确定性与缓存无关
-      if (v > dScore || (v === dScore && idx < dBestIdx)) {
-        dScore = v;
-        dBest = [r, c];
-        dBestIdx = idx;
-      }
-      // 根节点已确认必杀（我们下完这手，对方无论如何都挡不住成五）：
-      // 立刻收手落子，不再把预算浪费在已经赢定的局面上。
-      if (v >= WIN_SCORE) return [r, c];
+    let dBest = -1, dScore = -INF_SCORE;
+    for (let k = 0; k < ordered.length; k++) {
+      const idx = ordered[k];
+      const r = (idx / boardSize) | 0, c = idx - r * boardSize;
+      const isWin = cgFive[me - 1][idx] !== 0;
+      enterMove(r, c, me);
+      const v = isWin ? WIN_SCORE - 1 : -negamax(depth - 1, -beta, -alpha, opp, 1);
+      leaveMove(r, c, me);
+      if (searchAborted) break;
+      scored.push([idx, v]);
+      if (v > dScore) { dScore = v; dBest = idx; }
+      if (v > alpha) alpha = v;
     }
-    if (dBest) { bestMove = dBest; bestScore = dScore; }   // 这一层（或部分）完成，保留结果
-    if (!levelDone) break;                                // 超时：采用已有结果
-    // 根候选排序：按本层得分降序重排（同分保持原始顺序），让“疑似最优”在
-    // 下一层先试，第一手就能撑起更紧的 alpha 窗口，剪枝更早发生。
-    scored.sort((a, b) => b.v - a.v || a.idx - b.idx);
-    ordered = scored.map(s => ({ r: s.r, c: s.c, idx: s.idx }));
+    // 本层跑完 → 全部可信；只跑了一部分 → 仅当出现了"比上一层更好"的着法才采用
+    if (dBest >= 0 && (scored.length === ordered.length || dScore > bestScore)) {
+      bestMove = dBest;
+      bestScore = dScore;
+    }
+    if (bestScore >= WIN_SCORE - 1000) break;          // 已找到必胜手，立刻收手
+    if (scored.length < ordered.length) break;         // 本层被预算打断：采用已有结果
+    scored.sort((a, b) => b[1] - a[1]);                // 下一层优先试好手，剪枝更早
+    ordered = scored.map((s) => s[0]);
+    const itTime = performance.now() - itStart;
+    if (performance.now() + itTime * 3 > searchDeadline) break;
   }
-  return bestMove || bestByScore(me, opp, level);  // 兜底：搜索失败时退回单步打分
+  if (bestMove < 0) return bestByScore(me, opp, level);
+  return [(bestMove / boardSize) | 0, bestMove % boardSize];
 }
 
 /* ---------------- 四、开局库（由生成器从既有模块取出；outputs/engine/opening-book.json 为可读副本） ---------------- */
@@ -1485,7 +2045,11 @@ function bestBySearch(me = aiColor, opp = playerColor, level, budgetMs = SEARCH_
  * 应答为 [相对行, 相对列, 权重 5~1]，相对坐标以天元为中心。完整说明见 gomoku.html 原注释。 */
 const OPENING_BOOK = {"B|":[[0,0,5]],"W|0,0,1":[[-1,0,5],[0,-1,4],[0,1,3],[1,0,2],[-1,-1,1]],"B|-1,0,2;0,0,1":[[-1,-1,5],[-1,1,4],[1,-1,3],[1,1,2],[0,-1,1]],"W|-1,-1,1;-1,0,2;0,0,1":[[1,1,5],[-2,-2,4],[0,-1,3],[0,1,2]],"B|-1,-1,1;-1,0,2;0,0,1;1,1,2":[[0,-1,5],[1,-1,4],[0,-2,3]],"W|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,1,2":[[1,0,5],[-1,-2,4],[-1,1,3]],"B|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,0,2;1,1,2":[[-1,-2,5],[2,1,4],[1,2,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,0,1;1,1,1;1,2,1":[[1,-1,5],[1,3,4],[-1,1,3]],"B|-1,-1,2;-1,0,1;-1,1,1;-1,2,1;0,0,1;0,1,2;1,-1,2;1,0,2":[[-1,3,5],[-1,4,4],[-2,0,3]],"W|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,0,2;1,1,2;2,1,1":[[1,2,5],[1,-1,4],[-1,-2,3]],"B|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,0,2;1,1,2;1,2,2;2,1,1":[[1,-1,5],[1,3,4],[-1,1,3]],"B|-1,-1,2;0,0,1;0,1,1;1,0,2;1,1,1;2,1,2":[[0,-1,5],[-1,-2,4],[-2,-1,3]],"W|-1,-1,2;-1,0,1;0,0,1;0,1,2;1,0,1;1,1,1;1,2,2":[[2,0,5],[-2,0,4],[0,-1,3]],"B|-1,-1,2;-1,0,1;0,0,1;0,1,2;1,0,1;1,1,1;1,2,2;2,0,2":[[-2,0,5],[1,-1,4],[2,2,3]],"W|-1,-2,1;-1,-1,2;0,0,1;0,1,1;1,0,2;1,1,1;2,1,2":[[0,-1,5],[0,2,4],[0,-2,3]],"B|-1,-2,1;-1,-1,2;0,-1,2;0,0,1;0,1,1;1,0,2;1,1,1;2,1,2":[[4,3,5],[3,2,4],[-2,-1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1;1,1,2":[[-2,0,5],[1,0,4],[0,1,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,-1,1;0,0,1;1,-1,2;1,1,2":[[0,1,5],[0,-3,4],[1,0,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2;1,1,2":[[0,-3,5],[1,-3,4],[-2,0,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1;1,0,1;1,1,2":[[-2,0,5],[2,0,4],[0,1,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;1,-1,2;1,1,2":[[0,2,5],[1,0,4],[-1,-3,3]],"W|-1,-1,1;-1,0,2;0,0,1;1,-1,1;1,1,2":[[-1,1,5],[0,-1,4],[0,1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,-1,1;1,1,2":[[0,-1,5],[2,-1,4],[-2,1,3]],"W|-1,-1,1;-1,0,1;-1,1,1;0,-1,2;0,0,1;1,-1,2;1,1,2":[[-1,-2,5],[-1,2,4],[1,0,3]],"B|-1,-1,1;-1,0,1;-1,1,1;-1,2,2;0,0,1;0,1,2;1,-1,2;1,1,2":[[1,0,5],[-1,-2,4],[0,-2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,-1,1;1,1,2;2,-1,1":[[0,-1,5],[0,1,4],[3,-1,3]],"B|-1,-1,1;-1,0,2;-1,1,1;-1,2,1;0,-1,2;0,0,1;1,-1,2;1,1,2":[[1,-2,5],[0,2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;-1,1,1;0,-1,2;0,0,1;1,1,2":[[-2,2,5],[1,-1,4],[-2,1,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,2;2,-2,1":[[3,-3,5],[-1,1,4],[1,-2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,2;2,-2,1;3,-3,2":[[-1,1,5],[1,-2,4],[2,-1,3]],"W|-1,-1,1;-1,0,2;-1,1,1;0,-1,2;0,0,1;1,-1,1;1,1,2":[[-2,2,5],[2,-2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;-1,1,1;0,-1,2;0,0,1;1,-1,1;1,1,2;2,-2,2":[[-2,2,5],[1,-2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,1;1,1,2":[[-1,1,5],[2,-1,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;-1,1,1;0,-1,2;0,0,1;1,-1,2;1,1,1":[[-2,-2,5],[2,2,4],[1,-2,3]],"B|-1,-1,1;-1,1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;1,1,2;2,-2,2":[[-2,2,5],[-1,-2,4],[-1,2,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,1;1,1,2;2,-1,1":[[-2,-1,5],[0,-1,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,-2,1;1,-1,1;1,1,1;1,2,2":[[1,0,5],[1,-3,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,0,1;1,1,2":[[0,1,5],[0,-1,4],[-2,-1,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,0,1;0,1,2;1,1,2":[[1,-3,5],[-2,0,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,0,1;0,1,2;1,-3,1;1,1,2":[[2,-4,5],[-2,0,4],[1,2,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,0,1;0,1,2;1,-3,1;1,1,2;2,-4,2":[[-2,0,5],[-2,-1,4],[1,2,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,1,2;0,2,1;1,1,1;2,0,1":[[-1,3,5],[3,-1,4],[1,2,3]],"B|-1,-1,2;-1,0,2;-1,3,2;0,0,1;0,1,2;0,2,1;1,1,1;2,0,1":[[3,-1,5],[-1,1,4],[-1,2,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,1,2":[[1,-3,5],[-2,0,4],[1,-2,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,1,2":[[2,-4,5],[-2,0,4],[1,-2,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,1,2;2,-4,2":[[-2,0,5],[1,-2,4],[0,-3,3]],"W|-1,-1,2;0,0,1;0,1,2;0,2,1;1,0,2;1,1,1;2,0,1":[[3,-1,5],[-1,3,4],[2,-1,3]],"B|-1,-1,2;-1,3,2;0,0,1;0,1,2;0,2,1;1,0,2;1,1,1;2,0,1":[[3,-1,5],[-1,2,4],[2,-1,3]],"B|-1,-1,2;0,0,1;0,1,2;1,1,1;1,2,2;2,0,1":[[0,2,5],[3,-1,4],[3,0,3]],"W|-1,-1,2;0,0,1;0,1,2;0,2,1;1,1,1;1,2,2;2,0,1":[[-1,3,5],[3,-1,4],[-1,0,3]],"B|-1,-1,2;-1,3,2;0,0,1;0,1,2;0,2,1;1,1,1;1,2,2;2,0,1":[[3,-1,5],[-1,0,4],[3,0,3]],"W|-1,-1,2;-1,3,1;0,0,1;0,2,1;1,0,2;1,1,1;2,1,2":[[2,0,5],[-2,4,4],[0,-1,3]],"B|-1,-1,2;-1,3,1;0,0,1;0,2,1;1,0,2;1,1,1;2,0,2;2,1,2":[[-2,4,5],[0,-1,4],[0,3,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,0,1":[[0,-1,5],[0,-2,4],[1,-1,3]],"W|-2,-2,2;-1,-1,1;-1,0,1;0,-1,2;0,0,1":[[1,0,5],[-1,-2,4],[-2,0,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-1,1;1,0,1;2,-2,2":[[1,-2,5],[-2,1,4],[-1,1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,1;1,0,1;2,-2,2":[[1,1,5],[1,-3,4],[2,-1,3]],"B|-1,-1,2;0,-1,1;0,0,1;0,1,2;1,-1,1;1,0,2;2,-2,2;2,-1,1":[[3,-1,5],[0,-2,4],[-1,1,3]],"W|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,0,2;1,1,1;2,2,2":[[2,1,5],[3,2,4],[-1,0,3]],"B|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,0,2;1,1,1;2,1,2;2,2,2":[[3,2,5],[2,0,4],[2,3,3]],"B|-2,-2,2;-1,-2,2;-1,-1,1;-1,0,1;0,-1,2;0,0,1":[[1,0,5],[-2,0,4],[-1,1,3]],"W|-1,0,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,1;2,-2,2":[[2,0,5],[-2,0,4],[0,-2,3]],"B|-1,0,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,1;2,-2,2;2,0,2":[[-2,0,5],[1,1,4],[2,-1,3]],"W|-2,-2,2;-2,-1,2;-1,-1,1;-1,0,2;0,-2,1;0,-1,1;0,0,1":[[0,1,5],[0,-3,4],[-2,0,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,1;2,-2,2;2,0,1":[[3,0,5],[2,-3,4],[-2,1,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,-1,5],[-2,-1,4],[-1,-2,3]],"W|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2":[[2,-1,5],[-2,-1,4],[1,-2,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2;2,-1,2":[[-2,-1,5],[-2,-2,4],[1,1,3]],"W|-2,-2,2;-2,-1,1;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,-1,5],[-3,-1,4],[-1,-2,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2;2,-1,1":[[3,-1,5],[4,-1,4],[1,-2,3]],"W|-2,-2,2;-1,-1,1;-1,0,2;0,-2,1;0,0,1":[[-2,0,5],[0,-1,4],[0,1,3]],"B|-2,-2,2;-2,0,1;-1,-1,1;0,-2,2;0,-1,2;0,0,1":[[-1,0,5],[-3,0,4],[-1,-2,3]],"W|-2,-2,2;-2,0,1;-1,-1,1;-1,0,1;0,-2,2;0,-1,2;0,0,1":[[1,0,5],[-3,0,4],[-1,-2,3]],"B|-1,0,2;0,-2,2;0,-1,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,1":[[1,-2,5],[3,0,4],[3,-1,3]],"W|-2,-2,2;-2,0,2;-1,-1,1;-1,0,2;0,-3,1;0,-2,1;0,0,1":[[0,-1,5],[-2,-1,4],[0,-4,3]],"B|-2,-2,2;-2,0,2;-1,-1,1;-1,0,2;0,-3,1;0,-2,1;0,-1,2;0,0,1":[[1,-2,5],[-2,1,4],[1,-3,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1":[[1,-3,5],[-2,0,4],[1,-2,3]],"W|-1,-3,1;0,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,2":[[-2,-4,5],[2,0,4],[-1,-2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-3,1;2,-4,2":[[-2,0,5],[1,-2,4],[0,-3,3]],"W|-2,-2,2;-2,0,1;-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1":[[-3,1,5],[1,-3,4],[-2,1,3]],"B|-1,-3,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,2;2,0,1":[[3,1,5],[-1,-2,4],[2,1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[3,1,5],[0,-2,4],[1,-2,3]],"W|-1,-3,1;0,-2,1;0,0,1;0,1,2;1,-1,1;1,0,2;2,-2,2":[[-2,-4,5],[2,0,4],[2,-1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1;3,1,1;4,2,2":[[0,-2,5],[1,-2,4],[-2,1,3]],"W|-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[-1,-3,5],[3,1,4],[1,-2,3]],"B|-1,-3,2;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[3,1,5],[1,-2,4],[-1,1,3]],"W|-1,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2":[[2,-1,5],[0,-1,4],[0,1,3]],"B|-1,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2;2,-1,2":[[-2,-2,5],[1,1,4],[0,1,3]],"W|-2,-2,1;-1,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,2;2,-1,2":[[-3,-3,5],[1,1,4],[3,-2,3]],"B|-2,-2,2;-2,-1,2;-1,-1,1;-1,0,2;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[0,1,4],[-2,0,3]],"W|-1,-1,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,1,1;2,-2,2":[[-2,-2,5],[2,2,4],[-1,0,3]],"B|-1,-1,1;0,0,1;1,-1,1;1,0,2;1,1,1;2,-2,2;2,-1,2;2,2,2":[[-2,-2,5],[2,0,4],[2,1,3]],"B|-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,2":[[-2,-2,5],[1,1,4],[-1,-2,3]],"W|-2,-2,1;-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,2":[[-3,-3,5],[1,1,4],[-1,-2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[1,-2,4],[2,-1,3]],"W|-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;1,1,1;2,-2,2":[[-2,-2,5],[2,2,4],[-1,-2,3]],"B|-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;1,1,1;2,-2,2;2,2,2":[[-2,-2,5],[2,1,4],[-1,-2,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,0,2;2,-2,2":[[1,1,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,1;2,-2,2":[[-2,-2,5],[2,2,4],[1,-2,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,0,2;1,1,1;2,-2,2;2,2,2":[[-2,-2,5],[2,-1,4],[-2,-1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,1;2,-2,2;2,2,1":[[-1,-1,5],[3,3,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,1;2,-2,2;2,2,1":[[3,3,5],[1,-2,4],[1,2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1":[[-2,-2,5],[1,1,4],[-2,1,3]],"W|-2,-2,1;-1,-1,1;-1,0,2;0,-1,2;0,0,1":[[-3,-3,5],[1,1,4],[-2,1,3]],"B|-3,-3,2;-2,-2,1;-1,-1,1;-1,0,2;0,-1,2;0,0,1":[[1,1,5],[-2,1,4],[1,-2,3]],"W|-1,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1;3,3,2":[[-2,-2,5],[2,-1,4],[-1,2,3]],"B|-2,-2,2;-1,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1;3,3,2":[[2,-1,5],[-1,2,4],[0,-1,3]],"W|-1,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,2":[[-1,1,5],[2,-3,4],[3,-2,3]],"B|-1,-1,2;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1;3,3,2":[[0,2,5],[-2,2,4],[-1,3,3]],"B|-1,-1,2;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1":[[3,3,5],[2,-1,4],[-1,2,3]],"W|-1,-1,2;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1;3,3,1":[[4,4,5],[2,-1,4],[-1,2,3]],"B|-1,-1,2;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1;3,3,1;4,4,2":[[3,2,5],[2,3,4],[2,-1,3]],"W|-1,-1,2;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1":[[3,3,5],[0,-1,4],[-1,0,3]],"B|-1,-2,2;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1":[[3,-3,5],[-1,1,4],[-2,-3,3]],"W|-1,-2,2;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,1":[[-2,-3,5],[2,1,4],[4,-4,3]],"B|-2,-3,2;-1,-2,2;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,1":[[4,-4,5],[-1,1,4],[-3,-4,3]],"W|-1,-1,1;-1,2,2;0,0,1;0,1,2;1,0,2;1,1,1;2,2,1":[[-2,3,5],[2,-1,4],[3,3,3]],"B|-1,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,-1,2;2,2,1;3,-2,2":[[3,3,5],[-2,-2,4],[4,-3,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,1,1":[[-2,-2,5],[2,2,4],[-2,1,3]],"B|-1,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[2,-1,4],[-1,2,3]],"W|-2,-2,1;-1,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,2":[[-3,-3,5],[2,-1,4],[-1,2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1;3,3,2":[[1,2,5],[2,1,4],[-2,1,3]],"W|-1,-1,1;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[2,1,4],[1,2,3]],"B|-2,-1,1;-2,2,2;-1,0,2;-1,1,1;0,0,1;0,1,2;1,-1,1;2,-2,2":[[-1,-1,5],[-3,-1,4],[-2,-2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,2":[[-2,-2,5],[-2,1,4],[1,-2,3]],"W|-2,-2,1;-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,2":[[-3,-3,5],[-2,1,4],[1,-2,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,1;1,1,1;2,2,2":[[-2,-2,5],[2,1,4],[1,2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1":[[-2,-2,5],[2,2,4],[2,-3,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,2,1":[[2,-3,5],[-2,1,4],[-2,-2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,-3,2;2,2,1":[[-2,-2,5],[3,3,4],[3,-4,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,1":[[1,1,5],[-2,-1,4],[-1,-2,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,1;1,1,2":[[1,-3,5],[0,-2,4],[1,-1,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-3,1;1,-2,1;1,1,2":[[0,-2,5],[1,-4,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,-1,2;0,0,1;1,-3,1;1,-2,1;1,1,2":[[1,-4,5],[-2,-2,4],[1,-1,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,1,2":[[1,-3,5],[-2,1,4],[-1,-2,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-3,2;1,-2,1;1,1,2":[[2,-2,5],[-1,-2,4],[-2,-2,3]],"B|-1,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-1,2":[[2,-2,5],[-1,1,4],[0,-2,3]],"W|-1,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;2,-1,2":[[3,-3,5],[-1,1,4],[3,-2,3]],"B|-1,-2,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;2,-1,2;3,-3,2":[[-1,1,5],[3,-2,4],[1,-2,3]],"W|-1,-1,1;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;2,1,2":[[2,2,5],[-2,-2,4],[0,-1,3]],"B|-1,-1,1;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;2,1,2;2,2,2":[[-2,-2,5],[-1,1,4],[-1,0,3]],"B|-1,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,2":[[2,-2,5],[-1,1,4],[-1,0,3]],"W|-1,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,2;2,-2,1":[[3,-3,5],[-1,1,4],[2,-3,3]],"B|-1,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,1;1,0,2;2,-2,1;3,-3,2":[[-1,1,5],[2,-3,4],[-1,0,3]],"W|-1,-1,1;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;1,2,2":[[2,2,5],[-2,-2,4],[-1,0,3]],"B|-1,-1,1;-1,2,1;0,0,1;0,1,2;1,0,2;1,1,1;1,2,2;2,2,2":[[-2,-2,5],[-1,0,4],[2,3,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2":[[1,1,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1":[[-2,-2,5],[2,2,4],[-2,-1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,2":[[-2,-2,5],[1,2,4],[-2,-1,3]],"W|-2,-2,1;-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,2":[[-3,-3,5],[1,2,4],[-2,-1,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,1;3,3,2":[[1,2,5],[2,1,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;2,2,2":[[-2,-2,5],[1,3,4],[1,0,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;2,2,2":[[1,3,5],[1,0,4],[-1,1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,2":[[2,2,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,2;2,2,1":[[2,3,5],[-2,-1,4],[3,3,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,2;2,2,1;2,3,2":[[3,3,5],[-2,-2,4],[-2,-1,3]],"W|-1,-2,2;-1,-1,1;0,-1,2;0,0,1;1,0,2;1,1,1;2,2,1":[[2,1,5],[-2,-3,4],[3,2,3]],"B|-1,-2,2;-1,-1,1;0,-1,2;0,0,1;1,0,2;1,1,1;2,1,2;2,2,1":[[-2,-2,5],[3,3,4],[3,2,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,1":[[-1,1,5],[3,-3,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,1":[[3,3,5],[1,2,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,1;3,3,1":[[4,4,5],[1,2,4],[-2,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,1;3,3,1;4,4,2":[[1,2,5],[-1,1,4],[-2,-1,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;2,2,1":[[-1,-2,5],[-1,2,4],[-1,1,3]],"B|-1,-2,2;-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;2,2,1":[[3,3,5],[-1,1,4],[-1,-3,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[1,-2,4],[2,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,1,1;2,2,1;3,3,2":[[-2,-2,5],[1,2,4],[-2,-1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[3,-2,4],[1,0,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;2,2,1;3,3,2":[[1,3,5],[3,2,4],[1,0,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,-1,1;2,-2,1":[[-1,1,5],[3,-3,4],[2,-3,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,-1,1;2,-2,1;3,-3,1":[[2,-3,5],[-2,1,4],[3,-4,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,-1,1;2,-3,2;2,-2,1;3,-3,1":[[-1,1,5],[4,-4,4],[3,-4,3]],"W|-1,-2,1;-1,-1,1;0,-1,2;0,0,1;1,0,2":[[1,1,5],[-1,0,4],[-2,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1":[[1,0,5],[1,3,4],[0,2,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,1,1;1,2,1;1,3,1":[[1,0,5],[1,4,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,0,2;1,1,1;1,2,1;1,3,1":[[1,4,5],[2,0,4],[0,2,3]],"B|-1,-2,1;-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,0,2":[[-2,-2,5],[1,1,4],[1,-2,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,1;1,0,2;2,-2,1":[[-1,1,5],[3,-3,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,0,2;1,1,1;1,2,1;2,2,1":[[3,3,5],[3,2,4],[-1,2,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,0,2;1,1,1;1,2,1":[[2,2,5],[-2,-2,4],[-1,2,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,0,2;1,1,1;1,2,1;2,2,2":[[-2,-2,5],[-1,2,4],[2,-1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,1;2,-2,2":[[1,-3,5],[1,0,4],[-1,1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-3,1;1,-2,1;1,-1,1;2,-2,2":[[1,0,5],[1,-4,4],[-1,1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-3,1;1,-2,1;1,-1,1;1,0,2;2,-2,2":[[1,-4,5],[1,-5,4],[-1,-2,3]],"W|-1,-1,1;0,0,1;0,1,2":[[1,1,5],[-1,0,4],[1,0,3],[-2,-2,2]],"B|-1,-1,1;0,0,1;0,1,2;1,1,2":[[-1,1,5],[-1,0,4],[-2,0,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,-1,1":[[1,1,5],[-2,1,4],[0,-1,3]],"B|-1,-1,1;-1,1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2":[[-1,0,5],[1,1,4],[-2,-2,3]],"W|-1,-1,1;-1,0,1;-1,1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2":[[-1,-2,5],[-1,2,4],[1,0,3]],"B|-1,-1,1;-1,0,1;-1,1,1;-1,2,2;0,0,1;0,1,2;1,1,2;1,2,2":[[1,0,5],[-1,-2,4],[1,-1,3]],"W|-1,-1,1;-1,1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;1,1,1":[[-2,-2,5],[2,2,4],[-1,0,3]],"B|-1,-1,1;-1,1,1;0,0,1;1,-1,1;1,0,2;1,1,2;2,-2,2;2,1,2":[[-2,2,5],[-1,-2,4],[-1,2,3]],"B|-1,-1,1;-1,0,2;-1,1,1;0,-1,2;0,0,1;1,-1,2":[[-2,-2,5],[1,1,4],[-2,1,3]],"W|-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;1,1,2;2,-2,1":[[3,-3,5],[-1,1,4],[2,1,3]],"B|-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;1,1,2;2,-2,1;3,-3,2":[[-1,1,5],[-1,-2,4],[0,-2,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,1,2":[[-1,1,5],[1,0,4],[1,-1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,2;1,1,2":[[-2,1,5],[2,1,4],[-2,0,3]],"W|-1,-1,1;0,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2":[[1,2,5],[-1,0,4],[0,1,3]],"B|-1,-1,1;0,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2;1,2,2":[[1,3,5],[0,-2,4],[0,1,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,2;1,1,2;2,1,1":[[-2,1,5],[-2,0,4],[1,0,3]],"B|-1,-1,1;0,-1,1;0,0,1;1,-2,2;1,-1,2;1,0,2;1,1,2;1,2,1":[[1,-3,5],[0,-2,4],[0,1,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2;1,1,2":[[1,-1,5],[-1,1,4],[0,-1,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-1,1;1,0,2;1,1,2":[[-1,1,5],[-1,2,4],[2,-1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,2;1,-1,1;1,0,2;1,1,2":[[2,1,5],[-2,1,4],[0,-1,3]],"W|-1,-1,1;-1,0,1;-1,1,1;0,-1,2;0,0,1;1,-1,2;1,0,2":[[-1,-2,5],[-1,2,4],[1,1,3]],"B|-1,-1,1;-1,0,1;-1,1,1;-1,2,2;0,0,1;0,1,2;1,0,2;1,1,2":[[-1,-2,5],[-2,3,4],[2,-1,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-1,2;1,1,2":[[1,0,5],[-1,1,4],[0,-2,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-1,2;1,0,1;1,1,2":[[2,0,5],[-2,0,4],[-1,1,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-1,2;1,0,1;1,1,2;2,0,2":[[-2,0,5],[-1,1,4],[0,-2,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,0,2;1,1,2":[[1,-1,5],[1,2,4],[0,1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,0,2;1,1,2":[[1,-2,5],[1,2,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2":[[1,2,5],[2,-1,4],[0,1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2;1,2,2":[[1,3,5],[0,-1,4],[-1,-2,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,0,2;1,1,2;1,2,1":[[1,-2,5],[1,-3,4],[-2,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-2,2;1,-1,2;1,0,2;1,1,2;1,2,1":[[1,-3,5],[0,-1,4],[-2,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,0,2;1,1,2;1,2,2":[[1,-1,5],[1,3,4],[0,-1,3]],"W|-1,-1,1;-1,0,2;-1,1,2;-1,2,2;0,-2,1;0,0,1;1,-1,1":[[-1,3,5],[0,1,4],[0,-1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;-1,2,2;-1,3,2;0,-2,1;0,0,1;1,-1,1":[[-1,4,5],[0,-1,4],[-2,0,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,0,2;1,1,2;1,2,2;1,3,1":[[1,-1,5],[1,-2,4],[0,1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,0,2;1,1,2;1,2,2;1,3,1":[[1,-2,5],[0,-1,4],[1,-3,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,0,2;1,1,2":[[1,-3,5],[-2,0,4],[1,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,0,2;1,1,2":[[2,-4,5],[-2,0,4],[1,-1,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,0,2;1,1,2;2,-4,2":[[-2,0,5],[1,-1,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,-1,2;0,0,1;0,2,1;1,1,1;2,0,1":[[3,-1,5],[-1,3,4],[1,-1,3]],"B|-1,-1,2;-1,0,2;-1,3,2;0,-1,2;0,0,1;0,2,1;1,1,1;2,0,1":[[3,-1,5],[-1,1,4],[-1,2,3]],"B|-1,-1,1;0,0,1;0,1,2;1,0,2":[[1,1,5],[-2,-2,4],[-1,0,3]],"W|-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1":[[-1,-1,5],[3,3,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1":[[3,3,5],[2,1,4],[1,2,3]],"W|-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1;3,3,1":[[4,4,5],[-1,-2,4],[-2,-1,3]],"B|-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1;3,3,1;4,4,2":[[2,1,5],[1,2,4],[3,2,3]],"W|-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,1,1;1,2,1;2,2,1":[[-1,-2,5],[1,-1,4],[-2,1,3]],"B|-1,-2,2;-1,-1,2;-1,0,2;0,-1,2;0,0,1;1,1,1;1,2,1;2,2,1":[[3,3,5],[-1,1,4],[-1,-3,3]],"B|-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1;3,3,2":[[-1,-1,5],[2,1,4],[1,2,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,1,1;2,2,1;3,3,2":[[-2,-2,5],[1,-2,4],[-2,1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,1,1;1,2,1;2,2,1;3,3,2":[[-2,1,5],[1,-2,4],[-1,-1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,1,1;2,2,1;3,3,2":[[-1,-1,5],[2,-3,4],[-2,1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,2,1":[[-1,-1,5],[3,3,4],[2,-3,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,2,1;3,3,1":[[2,-3,5],[-2,1,4],[-1,-1,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,2;1,1,1;2,-3,2;2,2,1;3,3,1":[[-1,-1,5],[4,4,4],[3,-4,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2":[[-1,2,5],[1,1,4],[2,-1,3]],"B|-1,-1,1;-1,0,1;-1,2,2;0,0,1;0,1,2;1,0,2":[[-2,3,5],[2,-1,4],[1,1,3]],"W|-1,-1,1;0,-1,1;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,1":[[-1,2,5],[1,1,4],[-2,-2,3]],"B|-1,-1,1;-1,2,2;0,-1,1;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,1":[[-2,3,5],[1,1,4],[-2,-2,3]],"W|-1,-1,1;-1,0,1;-1,2,2;0,0,1;0,1,2;1,0,2;2,-1,1":[[-2,3,5],[1,1,4],[2,1,3]],"B|-1,-1,1;-1,2,1;0,-1,1;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,2":[[4,-3,5],[1,1,4],[-2,-2,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2;2,-1,2":[[-1,2,5],[3,-2,4],[-1,1,3]],"W|-1,-1,1;-1,0,1;-1,2,1;0,0,1;0,1,2;1,0,2;2,-1,2":[[3,-2,5],[-1,1,4],[1,1,3]],"B|-1,-1,1;-1,0,1;-1,2,1;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,2":[[-1,1,5],[-1,-2,4],[-1,3,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,1":[[-1,2,5],[1,1,4],[-2,-2,3]],"B|-1,-1,1;-1,0,1;-1,2,2;0,0,1;0,1,2;1,0,2;2,-1,2;3,-2,1":[[-2,3,5],[1,1,4],[-2,-2,3]],"B|-1,0,2;0,0,1;1,-1,1;2,-2,2":[[0,-1,5],[-1,-1,4],[1,1,3]],"W|-1,0,2;0,-1,1;0,0,1;1,-1,1;2,-2,2":[[0,1,5],[-1,-1,4],[2,-1,3]],"B|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2":[[2,-1,5],[1,0,4],[1,1,3]],"W|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2;2,-1,1":[[-1,-1,5],[3,-1,4],[-2,-1,3]],"B|-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2;2,-1,1":[[3,-1,5],[-1,-2,4],[-1,1,3]],"W|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-1,1;1,0,1;2,-2,2":[[-2,-1,5],[1,2,4],[1,-2,3]],"B|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-1,1;1,0,1;1,2,2;2,-2,2":[[-2,-1,5],[2,3,4],[-1,-1,3]],"B|-1,-1,2;-1,0,2;0,-1,1;0,0,1;1,-1,1;2,-2,2":[[0,-2,5],[0,1,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;1,-1,1;2,-2,2":[[0,1,5],[0,-3,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2":[[0,-3,5],[-1,-3,4],[2,0,3]],"W|-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,1;1,-1,1;2,-2,2":[[0,-2,5],[0,2,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;1,-1,1;2,-2,2":[[0,2,5],[-1,1,4],[-2,0,3]],"B|-1,0,2;0,-1,1;0,0,1;1,-1,1;2,-2,2;2,-1,2":[[0,-2,5],[0,1,4],[1,1,3]],"W|-1,0,2;0,-2,1;0,-1,1;0,0,1;1,-1,1;2,-2,2;2,-1,2":[[0,1,5],[0,-3,4],[2,0,3]],"B|-1,0,2;0,-1,2;0,0,1;0,1,1;0,2,1;1,1,1;2,1,2;2,2,2":[[0,3,5],[2,0,4],[1,0,3]],"W|-1,0,1;0,-1,2;0,0,1;1,0,1;1,1,1;1,2,2;2,2,2":[[2,0,5],[-2,0,4],[0,2,3]],"B|-1,0,1;0,-1,2;0,0,1;1,0,1;1,1,1;1,2,2;2,0,2;2,2,2":[[-2,0,5],[0,1,4],[2,1,3]],"W|-1,-1,1;-1,0,2;0,0,1;1,-1,1;2,-2,2":[[0,-1,5],[-2,-1,4],[0,1,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,2":[[-2,-2,5],[1,1,4],[1,-2,3]],"W|-2,-2,1;-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-1,1;2,-2,2":[[-3,-3,5],[1,1,4],[1,-2,3]],"B|-2,-2,2;-1,-1,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,2":[[-1,1,5],[-1,-2,4],[0,-2,3]],"B|-2,-1,2;-1,-1,1;-1,0,2;0,0,1;1,-1,1;2,-2,2":[[-2,-2,5],[1,1,4],[0,1,3]],"W|-2,-2,1;-2,-1,2;-1,-1,1;-1,0,2;0,0,1;1,-1,1;2,-2,2":[[-3,-3,5],[1,1,4],[-3,-2,3]],"B|-2,-2,2;-1,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,1;2,-1,2;3,-3,2":[[-1,1,5],[0,1,4],[3,-2,3]],"W|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,1,1;1,2,2;2,-2,2":[[2,2,5],[-2,-2,4],[-1,0,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,1,1;1,2,2;2,-2,2;2,2,2":[[-2,-2,5],[2,-1,4],[-2,-1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,1;2,-2,2":[[1,1,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,1;1,1,1;2,-2,2":[[-2,-2,5],[2,2,4],[-2,-1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,1;1,1,1;2,-2,2;2,2,2":[[-2,-2,5],[1,2,4],[-2,-1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-1,1;1,1,1;2,-2,1;2,2,2":[[-1,1,5],[3,-3,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,-1,1;1,1,1;2,-2,2;2,2,1":[[3,3,5],[1,2,4],[1,-2,3]],"W|-1,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2":[[1,1,5],[1,0,4],[3,-1,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,1,2;2,-2,2":[[0,-1,5],[-1,1,4],[1,0,3]],"W|-1,-1,1;0,-1,1;0,0,1;0,1,2;1,-1,1;1,1,2;2,-2,2":[[2,-1,5],[-2,-1,4],[-1,1,3]],"B|-1,-1,1;0,-1,1;0,0,1;0,1,2;1,-1,1;1,1,2;2,-2,2;2,-1,2":[[-2,-1,5],[1,0,4],[0,-2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,-1,1;1,1,1;2,2,2":[[-2,-2,5],[0,-1,4],[1,0,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,-1,1;1,1,1;2,2,2":[[0,-1,5],[1,0,4],[1,-2,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;2,-2,2;3,-1,2":[[1,1,5],[-2,-2,4],[0,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;1,-3,2;1,-1,1;1,1,1;2,-2,2":[[-2,-2,5],[2,2,4],[0,-4,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-1,1;1,1,1;2,-2,2;2,2,2;3,-1,2":[[-2,-2,5],[1,0,4],[0,-1,3]],"W|-1,0,2;0,0,1;1,-1,1;1,1,1;1,3,2;2,-2,1;2,2,2":[[-1,1,5],[3,-3,4],[0,4,3]],"B|-1,-1,2;-1,0,2;0,0,1;1,-3,2;1,-1,1;1,1,1;2,-2,2;2,2,1":[[3,3,5],[1,0,4],[1,2,3]],"W|-1,0,1;0,-1,2;0,0,1":[[1,0,5],[-1,-1,4],[-2,0,3],[-1,1,2]],"B|-1,0,1;0,-1,2;0,0,1;1,0,2":[[-1,-2,5],[-1,1,4],[2,1,3]],"W|-1,-2,1;-1,0,1;0,-1,2;0,0,1;1,0,2":[[-1,-1,5],[1,1,4],[-1,1,3]],"B|-1,-2,1;-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,0,2":[[-2,-1,5],[1,-1,4],[-2,0,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,2;1,0,1;2,-1,1":[[0,1,5],[-1,-1,4],[3,0,3]],"B|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,0,2;2,-1,1":[[3,0,5],[0,-3,4],[0,-2,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,2;1,0,1":[[2,-1,5],[-2,1,4],[0,1,3]],"B|-1,-1,1;-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,2;1,0,1;2,-1,2":[[-2,-2,5],[1,1,4],[3,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,0,1;1,2,1":[[1,1,5],[1,-1,4],[-1,-2,3]],"W|-1,-1,1;-1,0,1;-1,2,1;0,0,1;0,1,2;1,-1,2;1,0,2":[[-1,1,5],[1,1,4],[1,-2,3]],"B|-1,-1,1;-1,0,1;-1,1,2;-1,2,1;0,0,1;0,1,2;1,-1,2;1,0,2":[[1,1,5],[-2,0,4],[-2,2,3]],"B|-1,-1,2;-1,0,1;-1,2,1;0,0,1;0,1,2;1,0,2":[[-1,1,5],[-2,1,4],[-2,2,3]],"W|-1,-1,2;-1,0,1;-1,1,1;-1,2,1;0,0,1;0,1,2;1,0,2":[[-1,4,5],[-1,3,4],[1,-1,3]],"B|-1,-1,2;-1,0,1;-1,1,1;-1,2,1;-1,4,2;0,0,1;0,1,2;1,0,2":[[-2,2,5],[1,-1,4],[-2,0,3]],"W|-1,-1,2;0,-1,1;0,0,1;0,1,2;1,-2,1;1,0,2;2,-1,1":[[-1,0,5],[1,1,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,2;1,-2,1;1,0,2;2,-1,1":[[3,0,5],[0,-3,4],[0,-2,3]],"W|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,0,2":[[1,-1,5],[1,-2,4],[2,1,3]],"B|-1,-1,2;-1,0,2;0,-1,2;0,0,1;0,1,1;1,-2,1":[[1,-1,5],[1,0,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,-1,2;0,0,1;0,1,1;1,-2,1;1,-1,1":[[-1,1,5],[2,-2,4],[1,0,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,2;1,1,1;2,1,1":[[2,-1,5],[-2,-1,4],[0,1,3]],"W|-1,-1,2;-1,0,2;0,-1,2;0,0,1;0,1,1;1,-2,1;1,0,1":[[-1,-2,5],[-1,2,4],[-1,1,3]],"B|-1,-2,1;-1,0,1;0,-1,2;0,0,1;0,1,1;1,-2,2;1,-1,2;1,0,2":[[1,1,5],[1,-3,4],[-1,-1,3]],"B|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,-2,2;1,0,2":[[-1,1,5],[-1,0,4],[1,1,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2;2,-1,1;2,1,2":[[-1,-2,5],[3,2,4],[1,1,3]],"B|-1,-2,2;-1,-1,1;-1,0,1;0,0,1;0,1,2;1,0,2;2,-1,1;2,1,2":[[0,-1,5],[1,1,4],[-2,-2,3]],"W|-1,-2,1;-1,0,1;0,-1,2;0,0,1;0,1,1;1,-2,2;1,0,2":[[1,-1,5],[1,-3,4],[1,1,3]],"B|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,0,2;2,1,2":[[3,2,5],[-1,-1,4],[1,-1,3]],"W|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,0,2;2,1,2;3,2,1":[[1,-1,5],[1,2,4],[1,-2,3]],"B|-1,-2,1;0,-1,2;0,0,1;0,1,1;1,-1,2;1,0,2;2,1,2;3,2,1":[[-1,-1,5],[-1,0,4],[1,1,3]],"W|-1,-2,1;-1,-1,1;0,-1,2;0,0,1;0,1,1;1,0,2;2,1,2":[[3,2,5],[-1,0,4],[-1,-3,3]],"B|-1,-2,1;-1,-1,1;0,-1,2;0,0,1;0,1,1;1,0,2;2,1,2;3,2,2":[[4,3,5],[-1,0,4],[-2,-2,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1":[[-2,0,5],[1,0,4],[-2,-1,3]],"W|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1":[[0,1,5],[0,-3,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-3,5],[-1,-2,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-4,5],[-1,-2,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-4,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2":[[-1,-2,5],[1,2,4],[-2,-1,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[1,2,5],[-2,-1,4],[0,-3,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,2,2":[[0,-3,5],[-2,-1,4],[2,3,3]],"B|-1,-1,2;-1,0,2;0,-3,2;0,-2,1;0,-1,1;0,0,1":[[0,1,5],[-1,1,4],[-1,-2,3]],"W|-1,-1,2;-1,0,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1":[[0,2,5],[-1,-2,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2":[[-1,1,5],[-1,-2,4],[-1,2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,1,1;0,2,1;0,3,2":[[0,-1,5],[0,-2,4],[1,1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;0,2,1;0,3,2":[[1,1,5],[-2,-2,4],[1,-2,3]],"B|-1,-2,2;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1":[[0,-3,5],[0,1,4],[-1,-3,3]],"W|-1,-2,2;-1,-1,2;-1,0,2;0,-3,1;0,-2,1;0,-1,1;0,0,1":[[-1,-3,5],[-1,1,4],[-1,-4,3]],"B|-1,-3,2;-1,-2,2;-1,-1,2;-1,0,2;0,-3,1;0,-2,1;0,-1,1;0,0,1":[[0,-4,5],[0,1,4],[-1,-4,3]],"W|-1,-2,2;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,1":[[-1,1,5],[-1,-3,4],[-1,2,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,2;2,0,1":[[3,0,5],[-2,0,4],[3,-1,3]],"W|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,0,1":[[-2,0,5],[2,0,4],[1,-1,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1":[[0,2,5],[-1,1,4],[-2,0,3]],"W|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,1":[[0,3,5],[-1,1,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,1;0,3,2":[[-1,1,5],[1,-3,4],[-2,0,3]],"W|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,0,2":[[3,1,5],[0,-2,4],[-2,0,3]],"B|-1,-1,1;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,0,2;3,1,2":[[-2,0,5],[0,-2,4],[4,2,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,0,1;2,0,2":[[-2,0,5],[-2,-1,4],[1,-1,3]],"W|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2":[[0,-3,5],[-1,1,4],[-1,-2,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,1;0,2,2":[[0,-2,5],[0,-3,4],[1,0,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,2":[[1,0,5],[-2,-3,4],[1,-3,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,1":[[2,0,5],[-2,0,4],[2,-1,3]],"W|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,0,1":[[2,-1,5],[-2,-1,4],[3,-1,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1":[[0,1,5],[0,-2,4],[1,0,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,2":[[1,0,5],[-2,-3,4],[-2,-1,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,2;1,0,1":[[-2,-3,5],[2,1,4],[-2,-1,3]],"B|-1,0,1;0,-1,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,0,2;2,-3,2":[[-2,1,5],[2,-1,4],[-1,2,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,1;3,-2,1":[[0,1,5],[4,-3,4],[1,-2,3]],"B|-1,0,2;0,-1,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,0,2;2,-3,1":[[3,-4,5],[4,-5,4],[0,-2,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-2,-3,5],[1,0,4],[-2,0,3]],"W|-2,-3,1;-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-3,-4,5],[1,0,4],[1,-3,3]],"B|-3,-4,2;-2,-3,1;-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,0,5],[-2,0,4],[1,-3,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,0,1":[[-2,-3,5],[2,1,4],[1,-3,3]],"B|-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;2,-3,2":[[-2,1,5],[-1,-3,4],[2,0,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1;1,0,2":[[0,-2,5],[0,1,4],[-2,-3,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;1,0,2":[[0,1,5],[0,-3,4],[-2,-2,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2":[[0,-3,5],[1,-2,4],[-3,-2,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,-2,5],[0,2,4],[-1,1,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,2,5],[1,-3,4],[-2,0,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-1,-1,5],[1,-1,4],[-1,-2,3]],"W|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,-1,5],[-2,-1,4],[-2,-2,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2":[[-2,-2,5],[1,1,4],[2,0,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,1":[[3,-3,5],[-1,1,4],[1,-3,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,2":[[-1,1,5],[1,-3,4],[1,-2,3]],"W|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,1,1":[[-2,-2,5],[2,2,4],[2,0,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,1,1;0,2,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[-2,0,4],[0,-1,3]],"B|-2,-1,2;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-2,-2,5],[1,1,4],[0,1,3]],"W|-2,-2,1;-2,-1,2;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-3,-3,5],[1,1,4],[-3,-2,3]],"B|-3,-3,2;-2,-2,1;-2,-1,2;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,1,5],[0,1,4],[-3,-2,3]],"W|-1,-1,1;0,0,1;0,1,1;0,2,2;1,0,2;1,1,1;2,1,2":[[2,2,5],[-2,-2,4],[0,-1,3]],"B|-1,-1,1;0,0,1;0,1,1;0,2,2;1,0,2;1,1,1;2,1,2;2,2,2":[[-2,-2,5],[0,-1,4],[3,2,3]],"W|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,0,2":[[1,-1,5],[-2,-1,4],[0,1,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,2":[[1,1,5],[1,-2,4],[-1,0,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,1,1;0,2,2;1,1,1":[[-2,-2,5],[2,2,4],[-2,0,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[2,0,4],[-1,-3,3]],"W|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2":[[-1,-3,5],[2,0,4],[-1,0,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,-1,1":[[2,-4,5],[-2,0,4],[1,0,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;2,-1,2":[[-1,1,5],[2,-2,4],[0,1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,1;0,2,2;1,1,1;2,1,2":[[2,2,5],[-2,-2,4],[1,2,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,1;0,2,2;1,1,1;2,1,2;2,2,2":[[-2,-2,5],[1,0,4],[1,2,3]],"W|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;2,-2,1;2,-1,2":[[-1,1,5],[3,-3,4],[-1,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,1;0,2,2;1,1,1;2,1,2;2,2,1":[[3,3,5],[-1,1,4],[1,-1,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,2":[[1,1,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-1,2;0,0,1;0,1,1;0,2,2;1,1,1":[[-2,-2,5],[2,2,4],[-2,1,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[-2,-1,4],[2,-1,3]],"W|-1,0,2;0,-1,2;0,0,1;0,1,1;0,2,2;1,1,1;2,2,1":[[-1,-1,5],[3,3,4],[-2,1,3]],"B|-1,-1,2;-1,0,2;0,-1,2;0,0,1;0,1,1;0,2,2;1,1,1;2,2,1":[[3,3,5],[3,1,4],[1,-1,3]],"W|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[1,0,5],[0,1,4],[-1,-1,3]],"B|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,0,2":[[1,-1,5],[-1,-1,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,0,2":[[-2,-1,5],[1,-1,4],[0,1,3]],"B|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,0,2;2,-1,2":[[-1,1,5],[2,-2,4],[0,1,3]],"W|-1,-2,1;-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,0,2":[[-2,-1,5],[1,-1,4],[0,1,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,-1,1;1,0,2;2,-1,2":[[-1,1,5],[2,-2,4],[0,1,3]],"B|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,2":[[1,0,5],[-2,-3,4],[-2,-1,3]],"W|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,1":[[-2,-3,5],[2,1,4],[-2,-1,3]],"B|-1,0,1;0,-1,2;0,0,1;0,1,1;0,2,2;1,0,2;1,2,1;2,3,2":[[-2,-1,5],[2,1,4],[-1,-2,3]],"W|-1,0,2;0,-1,2;0,0,1;1,0,1;2,-1,1;2,0,2;3,-2,1":[[0,1,5],[4,-3,4],[1,-2,3]],"B|-1,0,2;0,-1,2;0,0,1;0,1,1;0,2,2;1,0,2;1,2,1;2,3,1":[[3,4,5],[4,5,4],[1,-2,3]],"B|-1,-1,2;-1,0,1;0,0,1;0,1,2":[[-2,0,5],[1,0,4],[-1,1,3]],"W|-1,-1,2;0,-2,1;0,-1,1;0,0,1;1,0,2":[[0,1,5],[0,-3,4],[1,-1,3]],"B|-1,-1,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2":[[0,-3,5],[2,-1,4],[-1,2,3]],"W|-1,-1,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2":[[0,-4,5],[2,-1,4],[-1,2,3]],"B|-1,-1,2;0,-4,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2":[[2,-1,5],[-1,2,4],[-1,-3,3]],"W|-1,-1,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2;2,-1,1":[[0,-3,5],[1,-1,4],[-1,0,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,0,2;2,-1,1":[[1,-1,5],[2,-2,4],[2,0,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;1,0,2":[[0,1,5],[1,-2,4],[1,-1,3]],"W|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,2,5],[-1,-2,4],[1,-2,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2;1,0,2":[[1,-2,5],[-1,1,4],[-1,0,3]],"W|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;1,-2,1;1,0,2":[[0,1,5],[-1,-2,4],[-1,0,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,1;1,0,2":[[-1,-2,5],[-1,0,4],[2,-3,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;1,-1,2":[[0,1,5],[0,-3,4],[-1,-2,3]],"W|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,1;1,-1,2":[[0,-3,5],[0,2,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1;1,-1,2":[[0,2,5],[-1,-2,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;1,-1,2":[[0,1,5],[0,-4,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2":[[0,-4,5],[-1,-2,4],[-1,1,3]],"W|-1,-1,2;-1,0,1;0,0,1;0,1,2;1,0,1":[[-2,0,5],[2,0,4],[0,-1,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,2,5],[-2,0,4],[1,-3,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,1;1,0,2":[[0,3,5],[1,-3,4],[-2,0,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,1;0,3,2;1,0,2":[[-2,0,5],[1,-3,4],[1,2,3]],"W|-1,0,1;0,-1,2;0,0,1;0,2,1;1,0,1;1,1,2;2,0,2":[[-2,0,5],[0,1,4],[1,-1,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,2;1,-1,2;2,0,1":[[1,0,5],[2,1,4],[2,-1,3]],"B|-1,-1,2;-1,0,1;0,0,1;0,1,2;1,0,1;2,0,2":[[-2,0,5],[1,-1,4],[0,-1,3]],"W|-1,-1,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2;1,0,2":[[0,-3,5],[1,1,4],[-1,1,3]],"W|-1,-1,1;-1,1,2;0,-2,2;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,2,5],[1,-1,4],[1,1,3]],"B|-1,-1,1;-1,1,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,2;1,0,2":[[1,1,5],[1,-1,4],[-2,-2,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;0,1,2;1,0,1":[[-2,0,5],[2,0,4],[1,-1,3]],"W|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,1;1,0,2":[[0,2,5],[0,-3,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2;1,0,2":[[0,-3,5],[-1,1,4],[-1,-2,3]],"W|-1,-1,2;-1,0,1;0,-1,2;0,0,1;0,1,2;1,0,1;2,0,1":[[-2,0,5],[3,0,4],[1,-1,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,1;0,2,1;1,0,2":[[0,3,5],[-1,1,4],[-1,-2,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1":[[1,0,5],[-2,0,4],[1,1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1;1,0,2":[[1,1,5],[-2,-2,4],[-1,-2,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1;1,0,2;1,1,1":[[-2,-2,5],[2,2,4],[-1,-2,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,2;1,0,1;1,1,1;2,2,2":[[-2,-2,5],[1,2,4],[-2,-1,3]],"W|-1,-1,2;0,-1,1;0,0,1;0,1,2;1,-1,1;1,0,2;2,-2,1":[[-1,1,5],[3,-3,4],[2,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,1,2;1,-1,2;1,0,1;1,1,1;2,2,1":[[3,3,5],[4,4,4],[-2,-1,3]],"B|-1,-1,2;0,0,1":[[-1,1,5],[1,-1,4],[-2,0,3],[0,-2,2],[-1,0,1]],"W|-1,-1,1;-1,1,2;0,0,1":[[1,1,5],[-2,0,4],[0,2,3],[-2,-2,2]],"B|-1,-1,1;-1,1,2;0,0,1;1,1,2":[[-1,0,5],[1,0,4],[-2,1,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,0,1;1,1,2":[[0,1,5],[-2,0,4],[1,0,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,1,2":[[1,0,5],[-1,-2,4],[-1,0,3]],"W|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;1,1,2":[[2,0,5],[2,1,4],[-1,0,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;1,1,2;2,0,2":[[-1,-3,5],[3,1,4],[-1,-2,3]],"W|-1,-1,2;-1,1,2;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,-1,1":[[-1,0,5],[1,-3,4],[1,0,3]],"B|-1,-1,2;-1,0,2;-1,1,2;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,-1,1":[[-1,-2,5],[-1,2,4],[1,-3,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,0,1;1,0,2;1,1,2":[[0,1,5],[0,-1,4],[-2,-1,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,1;1,0,2;1,1,2":[[1,2,5],[0,2,4],[-2,-1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,1;1,0,2;1,1,2;1,2,2":[[1,3,5],[1,-1,4],[0,-1,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,-1,1;0,0,1;1,0,2;1,1,2":[[1,-2,5],[1,2,4],[0,1,3]],"B|-1,-1,1;-1,0,1;-1,1,2;0,-1,1;0,0,1;1,-2,2;1,0,2;1,1,2":[[1,-1,5],[0,1,4],[0,-2,3]],"W|-1,-1,1;-1,1,2;0,0,1;1,0,1;1,1,2":[[0,1,5],[2,0,4],[-2,0,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,1,2;1,0,1;1,1,2":[[2,1,5],[-2,1,4],[-1,0,3]],"W|-1,-1,1;-1,1,2;0,0,1;0,1,2;1,0,1;1,1,2;2,1,1":[[-2,1,5],[-3,1,4],[0,-1,3]],"B|-1,-1,1;0,0,1;0,1,1;1,-2,2;1,-1,2;1,0,2;1,1,2;1,2,1":[[1,-3,5],[0,2,4],[0,-1,3]],"W|-1,-1,1;0,0,1;0,1,1;1,-2,1;1,-1,2;1,0,2;1,1,2":[[1,2,5],[0,2,4],[0,-1,3]],"B|-1,-1,1;0,0,1;0,1,1;1,-2,1;1,-1,2;1,0,2;1,1,2;1,2,2":[[1,3,5],[0,-1,4],[0,2,3]],"B|-1,-1,1;-1,1,2;0,0,1;1,0,1;1,1,2;2,0,2":[[0,-1,5],[3,-1,4],[0,2,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,1;0,2,2;1,-1,2;1,1,2":[[2,0,5],[-1,3,4],[1,2,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,1;0,2,2;1,-1,2;1,1,2;2,0,2":[[3,-1,5],[-1,3,4],[1,2,3]],"W|-1,-1,1;-1,1,2;0,0,1;1,0,1;1,1,2;2,0,2;3,-1,1":[[0,1,5],[0,2,4],[-2,0,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,1,2;1,0,1;1,1,2;2,0,2;3,-1,1":[[2,1,5],[-2,1,4],[0,-1,3]],"B|-1,-1,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,1,2":[[0,2,5],[-1,0,4],[-1,-3,3]],"W|-1,-1,1;0,-2,2;0,0,1;0,1,1;0,2,1;1,-1,2;1,1,2":[[0,3,5],[1,0,4],[-1,-3,3]],"B|-1,-1,1;0,-2,2;0,0,1;0,1,1;0,2,1;0,3,2;1,-1,2;1,1,2":[[-1,0,5],[1,2,4],[-1,2,3]],"W|-1,-1,1;-1,0,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,1,2":[[-1,-3,5],[1,2,4],[1,-2,3]],"B|-1,-1,2;-1,0,1;0,0,1;0,1,1;1,-1,2;1,1,1;2,0,2;3,1,2":[[0,-2,5],[4,2,4],[0,-1,3]],"W|-1,-1,1;0,0,1;1,-2,1;1,-1,2;1,1,2":[[2,0,5],[0,1,4],[1,0,3]],"B|-1,-1,1;0,0,1;1,-2,1;1,-1,2;1,1,2;2,0,2":[[0,-2,5],[-1,0,4],[3,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,1,2;2,0,2":[[3,-1,5],[0,2,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,1,2;2,0,2;3,-1,2":[[4,-2,5],[0,2,4],[-1,-2,3]],"W|-1,-1,1;-1,0,1;0,0,1;1,-2,1;1,-1,2;1,1,2;2,0,2":[[3,-1,5],[3,1,4],[0,2,3]],"B|-1,-1,1;-1,0,1;0,0,1;1,-2,1;1,-1,2;1,1,2;2,0,2;3,-1,2":[[4,-2,5],[0,2,4],[-2,0,3]],"B|-1,-1,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,1,2":[[-1,0,5],[-2,0,4],[0,-2,3]],"W|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,1,2":[[1,0,5],[-1,1,4],[2,1,3]],"B|-1,-1,1;-1,0,1;0,0,1;0,1,2;1,-2,1;1,-1,2;1,0,2;1,1,2":[[0,-1,5],[-2,1,4],[2,-3,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,2,1;1,-1,2;1,1,1;2,-1,1":[[-1,1,5],[-1,-2,4],[2,0,3]],"B|-1,-1,2;-1,0,2;-1,1,2;0,-2,1;0,0,1;1,-1,1;1,1,2;2,1,1":[[-1,-2,5],[-1,2,4],[2,0,3]],"B|-1,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2":[[1,2,5],[0,-2,4],[0,-1,3]],"W|-1,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2;1,2,1":[[2,0,5],[2,-1,4],[0,1,3]],"B|-1,-1,1;0,0,1;1,-2,1;1,-1,2;1,0,2;1,1,2;1,2,1;2,0,2":[[0,-2,5],[0,2,4],[0,1,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2":[[-2,-2,5],[1,1,4],[2,0,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1":[[3,-3,5],[-1,1,4],[1,-3,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[1,-3,4],[-2,0,3]],"W|-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1;2,2,1;3,3,2":[[-2,-2,5],[1,3,4],[-2,0,3]],"B|-2,-2,2;-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1;2,2,1;3,3,2":[[-2,0,5],[1,3,4],[2,1,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-3,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[0,-4,4],[3,-1,3]],"B|-1,-1,2;-1,1,2;0,-2,2;0,0,1;1,-3,1;1,-1,1;2,-2,1;3,-3,2":[[0,-4,5],[3,-1,4],[1,-2,3]],"B|-1,-1,2;-1,1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1":[[3,-3,5],[1,-3,4],[0,1,3]],"W|-1,-1,2;-1,1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1;3,-3,1":[[4,-4,5],[-2,0,4],[1,-3,3]],"B|-1,-1,2;-1,1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1;3,-3,1;4,-4,2":[[1,-3,5],[0,1,4],[2,-1,3]],"W|-1,-1,2;-1,1,2;0,-2,2;0,0,1;1,-3,1;1,-1,1;2,-2,1":[[-1,0,5],[-1,-2,4],[-1,2,3]],"B|-1,-1,2;-1,0,2;-1,1,2;0,-2,2;0,0,1;1,-3,1;1,-1,1;2,-2,1":[[3,-3,5],[-1,-2,4],[-1,2,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-3,2;1,-1,1;2,-2,1":[[3,-3,5],[-1,1,4],[2,-4,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-3,2;1,-1,1;2,-2,1;3,-3,1":[[2,-4,5],[-2,0,4],[4,-4,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-3,2;1,-1,1;2,-4,2;2,-2,1;3,-3,1":[[4,-4,5],[-1,1,4],[3,-5,3]],"W|-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1;1,3,2;2,2,1":[[-2,0,5],[2,4,4],[3,3,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,2;2,2,1;3,1,2":[[3,3,5],[-2,-2,4],[4,2,3]],"W|-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1":[[2,2,5],[-2,-2,4],[-2,0,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1;2,2,2":[[-2,-2,5],[-2,0,4],[0,-1,3]],"W|-2,-2,1;-1,-1,1;-1,1,2;0,0,1;0,2,2;1,1,1;2,2,2":[[-3,-3,5],[1,3,4],[-2,0,3]],"B|-2,-2,2;-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,1;3,3,2":[[2,0,5],[0,1,4],[2,1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,1,1;2,0,2;2,2,2":[[2,1,5],[2,-1,4],[2,3,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,1,1;2,0,2;2,1,2;2,2,2":[[-2,-2,5],[2,-1,4],[2,3,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,2":[[-2,-2,5],[2,0,4],[-1,-3,3]],"W|-2,-2,1;-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,2":[[-3,-3,5],[-1,-3,4],[2,0,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,1;2,2,2":[[-2,-2,5],[3,-1,4],[0,2,3]],"B|-2,-2,2;-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,1,1;2,0,2;2,2,2":[[1,-3,5],[-2,0,4],[0,-1,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,2":[[-2,-2,5],[2,2,4],[-1,-3,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,2;2,2,1":[[3,1,5],[-1,-3,4],[3,3,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-1,2;2,0,1":[[-2,-2,5],[1,1,4],[1,-2,3]],"B|-2,-2,2;-1,-1,1;0,-2,2;0,0,1;1,-1,2;2,0,1":[[1,0,5],[-1,0,4],[-1,-2,3]],"W|-2,-2,2;-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,0,1;2,0,1":[[-1,0,5],[3,0,4],[-1,-2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;0,-2,2;0,0,1;1,-1,2;1,0,1;2,0,1":[[3,0,5],[-1,-2,4],[2,-1,3]],"W|-2,-2,2;-1,-1,1;-1,0,1;0,-2,2;0,0,1;1,-1,2;2,0,1":[[1,0,5],[-1,-2,4],[-2,0,3]],"B|-2,-2,2;-1,-1,1;-1,0,1;0,-2,2;0,0,1;1,-1,2;1,0,2;2,0,1":[[-1,-2,5],[1,-2,4],[0,-1,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,2;2,0,1":[[1,0,5],[0,1,4],[1,2,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,0,1;1,1,2;2,0,1":[[-1,0,5],[3,0,4],[2,-1,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,0,1;1,-1,2;1,0,1;1,1,2;2,0,1":[[3,0,5],[-2,-2,4],[0,1,3]],"W|-1,-1,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,1,2;2,0,1":[[1,0,5],[2,-1,4],[3,0,3]],"B|-1,-1,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,0,2;1,1,2;2,0,1":[[1,-2,5],[1,2,4],[0,2,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-2,2;1,-1,2;2,0,1":[[1,0,5],[-1,-2,4],[-2,-2,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-2,2;1,-1,2;1,0,1;2,0,1":[[-1,0,5],[3,0,4],[-1,-2,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,0,1;1,-2,2;1,-1,2;1,0,1;2,0,1":[[3,0,5],[-2,-2,4],[0,-1,3]],"W|-1,-2,1;-1,-1,1;0,-2,2;0,0,1;1,-2,2;1,-1,2;2,0,1":[[2,-1,5],[0,-3,4],[1,1,3]],"B|-1,-2,1;-1,-1,1;0,-2,2;0,0,1;1,-2,2;1,-1,2;2,-1,2;2,0,1":[[-1,0,5],[1,1,4],[-2,-2,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,2,2":[[1,1,5],[-2,-2,4],[-2,0,3]],"W|-2,-2,1;-1,-1,1;-1,1,2;0,0,1;0,2,2":[[1,1,5],[-3,-3,4],[-2,0,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,1":[[3,3,5],[2,0,4],[-2,0,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,1;3,3,1":[[4,4,5],[2,0,4],[1,-3,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,1;3,3,1;4,4,2":[[2,0,5],[-2,0,4],[2,1,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,1;2,2,1":[[1,-3,5],[-2,0,4],[2,-1,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-3,2;1,-1,2;1,1,1;2,0,1;2,2,1":[[3,3,5],[2,-4,4],[-2,0,3]],"B|-2,0,2;-1,-1,2;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[0,-2,4],[2,-1,3]],"W|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,2,1;3,3,2":[[-2,-2,5],[2,0,4],[-1,-3,3]],"W|-2,0,2;-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,-2,1;3,-3,2":[[-1,1,5],[1,-2,4],[-1,-3,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,1;2,2,1;3,3,2":[[3,-1,5],[0,2,4],[1,0,3]],"B|-2,-2,1;-1,-1,1;0,-2,2;0,0,1;1,-1,2;2,0,2":[[1,1,5],[-3,-3,4],[-1,-3,3]],"W|-2,0,2;-1,-1,2;0,-2,2;0,0,1;1,-1,1;2,-2,1;3,-3,1":[[1,-3,5],[-3,1,4],[2,-4,3]],"B|-2,0,2;-1,-1,2;0,-2,2;0,0,1;1,-3,2;1,-1,1;2,-2,1;3,-3,1":[[-1,1,5],[4,-4,4],[2,-4,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-1,2;2,0,2":[[1,1,5],[1,-3,4],[1,-2,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,1,2;2,0,2":[[1,-3,5],[-2,0,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-1,2;1,1,2;2,0,2":[[2,-4,5],[-2,0,4],[3,-1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-1,2;1,1,2;2,-4,2;2,0,2":[[-2,0,5],[0,-1,4],[0,-3,3]],"W|-1,-1,2;0,-2,2;0,0,1;0,2,1;1,-1,2;1,1,1;2,0,1":[[3,-1,5],[-1,3,4],[1,-3,3]],"B|-1,-1,2;0,-2,2;0,0,1;0,2,1;1,-1,2;1,1,1;2,0,1;3,-1,2":[[-1,3,5],[0,1,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-3,2;1,-1,2;2,0,2":[[1,1,5],[-2,-2,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-3,2;1,-1,2;1,1,1;2,0,2":[[-2,-2,5],[2,2,4],[1,-2,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,1;2,2,2;3,-1,2":[[-2,-2,5],[1,0,4],[-1,0,3]],"W|-2,-2,1;-1,-1,1;0,-2,1;0,0,1;1,-3,2;1,-1,2;2,0,2":[[1,1,5],[-3,-3,4],[1,-2,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,2;1,1,1;2,0,1;2,2,1;3,-1,2":[[3,3,5],[1,0,4],[2,-1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-2,2;1,-1,2;2,0,2":[[1,-3,5],[1,1,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,0,2":[[2,-4,5],[-2,0,4],[1,1,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-4,2;2,0,2":[[-2,0,5],[1,1,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-2,2;1,-1,2;1,1,1;2,0,2":[[-2,-2,5],[2,2,4],[1,-3,3]],"B|-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,1,1;2,-1,2;2,0,1;2,2,2":[[-2,-2,5],[3,-1,4],[1,0,3]],"B|-1,-1,2;0,0,1;1,-1,1;2,-2,2":[[2,0,5],[0,-2,4],[1,0,3]],"W|-1,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[-1,0,5],[0,-2,4],[-2,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[3,1,5],[-1,1,4],[0,-2,3]],"W|-1,-1,2;-1,0,2;0,0,1;1,-1,1;2,-2,2;2,0,1;3,1,1":[[0,-2,5],[4,2,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,0,1;1,-1,1;2,-2,2;2,0,1;3,1,1":[[4,2,5],[1,0,4],[-1,1,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,1,1;2,0,1;2,2,2":[[-2,-2,5],[0,2,4],[3,-1,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,0,1;1,1,1;2,0,1;2,2,2":[[0,2,5],[3,-1,4],[1,0,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[1,0,5],[-1,0,4],[3,0,3]],"W|-1,-1,2;0,-2,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,1":[[-1,0,5],[3,0,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,1":[[3,0,5],[3,-1,4],[1,1,3]],"W|-1,-1,2;-1,0,1;0,-2,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[-2,0,5],[1,0,4],[1,-3,3]],"B|-2,-2,2;-2,0,1;-1,-1,1;0,-2,2;0,0,1;1,-1,2;1,0,1;2,0,2":[[-1,0,5],[-3,0,4],[-1,-3,3]],"B|-2,-1,2;-1,-1,2;0,0,1;1,-1,1;2,-2,2;2,0,1":[[1,0,5],[0,-2,4],[3,1,3]],"W|-2,-1,2;-1,-1,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,1":[[-1,0,5],[3,0,4],[-3,-1,3]],"B|-2,-1,2;-1,-1,2;-1,0,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,1":[[3,0,5],[1,-2,4],[3,1,3]],"W|-2,-1,2;-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,-2,2;2,0,1":[[-1,-3,5],[3,1,4],[-3,-1,3]],"B|-2,-1,2;-1,-3,2;-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,-2,2;2,0,1":[[3,1,5],[0,-1,4],[-1,0,3]],"W|-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,-2,2":[[-1,0,5],[-1,-3,4],[1,-3,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,0,1;1,-1,1;2,-2,2":[[0,-1,5],[-1,-3,4],[0,-3,3]],"W|-1,-3,1;-1,-1,2;-1,0,2;0,-2,1;0,0,1;1,-1,1;2,-2,2":[[-2,-4,5],[2,0,4],[-1,1,3]],"B|-2,-2,2;-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-1,2;1,0,2;2,-4,2":[[-2,0,5],[0,-1,4],[1,1,3]],"B|-1,-3,2;-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,-2,2":[[0,-1,5],[-1,0,4],[1,0,3]],"W|-1,-3,2;-1,-1,2;0,-2,1;0,-1,1;0,0,1;1,-1,1;2,-2,2":[[0,-3,5],[0,1,4],[-1,-2,3]],"B|-1,-3,2;-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;1,-1,1;2,-2,2":[[0,1,5],[1,-2,4],[1,-3,3]],"W|-1,-3,2;-1,-1,2;-1,0,1;0,-2,1;0,0,1;1,-1,1;2,-2,2":[[1,0,5],[-1,-2,4],[0,-3,3]],"B|-1,-3,2;-1,-1,2;-1,0,1;0,-2,1;0,0,1;1,-1,1;1,0,2;2,-2,2":[[0,-1,5],[-1,1,4],[-2,0,3]],"B|-1,-1,2;0,-2,1;0,0,1;1,-3,2;1,-1,1;2,-2,2":[[-1,-3,5],[2,0,4],[0,-1,3]],"W|-1,-3,1;-1,-1,2;0,-2,1;0,0,1;1,-3,2;1,-1,1;2,-2,2":[[-2,-4,5],[2,0,4],[0,-4,3]],"B|-2,-2,2;-1,-3,2;-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-1,2;2,-4,2":[[-2,0,5],[0,-1,4],[0,-4,3]],"W|-1,-1,2;0,-2,1;0,0,1;1,-3,2;1,-1,1;2,-2,2;2,0,1":[[-1,-3,5],[3,1,4],[3,-1,3]],"B|-1,-3,2;-1,-1,2;0,-2,1;0,0,1;1,-3,2;1,-1,1;2,-2,2;2,0,1":[[3,1,5],[0,-3,4],[-1,0,3]],"W|-1,-1,2;0,0,1;1,-1,1;1,0,1;2,-2,2":[[-1,0,5],[2,0,4],[0,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;1,-1,1;1,0,1;2,-2,2":[[1,-2,5],[1,1,4],[-1,1,3]],"W|-1,-1,2;-1,0,2;0,0,1;1,-2,1;1,-1,1;1,0,1;2,-2,2":[[1,-3,5],[1,1,4],[-1,1,3]],"B|-1,-1,2;-1,0,2;0,0,1;1,-3,2;1,-2,1;1,-1,1;1,0,1;2,-2,2":[[1,1,5],[-1,1,4],[2,-1,3]],"B|-1,-1,2;0,0,1;1,-1,1;1,0,1;2,-2,2;2,0,2":[[1,-2,5],[1,1,4],[2,-1,3]],"W|-1,-1,2;0,0,1;1,-2,1;1,-1,1;1,0,1;2,-2,2;2,0,2":[[1,-3,5],[1,1,4],[2,-1,3]],"B|-1,-1,2;0,0,1;1,-3,2;1,-2,1;1,-1,1;1,0,1;2,-2,2;2,0,2":[[1,1,5],[0,-1,4],[2,-1,3]],"W|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,1,2;2,-2,2":[[2,-1,5],[-2,-1,4],[1,-2,3]],"B|-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-1,1;1,1,2;2,-2,2;2,-1,2":[[-2,-1,5],[1,0,4],[2,0,3]],"B|-1,-1,2;0,-2,2;0,0,1;1,-1,1;1,0,1;2,-2,2":[[2,0,5],[-2,0,4],[2,-1,3]],"W|-1,-1,2;0,-2,1;0,0,1":[[-1,0,5],[-1,-2,4],[0,-1,3],[0,1,2]],"B|-1,-1,2;-1,0,2;0,-2,1;0,0,1":[[0,-1,5],[-1,1,4],[-1,-2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,2,1":[[1,1,5],[-2,-2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,2,1;1,1,2":[[0,1,5],[1,2,4],[2,1,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,1,1;0,2,1;1,1,2":[[0,-1,5],[0,3,4],[-1,2,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;0,2,1;1,1,2":[[0,3,5],[0,4,4],[1,-2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,2,1;1,1,2;1,2,1":[[0,1,5],[-2,1,4],[-1,2,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,1,2;0,2,1;1,1,2;1,2,1":[[-2,1,5],[2,1,4],[-1,2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,2,1":[[0,1,5],[1,1,4],[-1,3,3]],"W|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,1,1;0,2,1":[[0,-1,5],[0,3,4],[-1,2,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;0,2,1":[[0,3,5],[1,-2,4],[-1,2,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-1,2;1,0,2;1,1,1;2,2,2":[[-2,-2,5],[0,-1,4],[1,-3,3]],"B|-2,-2,2;-1,-1,1;-1,0,2;-1,1,2;0,0,1;0,2,1;1,1,1;2,2,2":[[0,1,5],[-1,3,4],[2,0,3]],"B|-1,-1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;2,0,1":[[1,1,5],[-2,-2,4],[-1,0,3]],"W|-1,-1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;1,1,1;2,0,1":[[2,2,5],[-2,-2,4],[-1,0,3]],"B|-1,-1,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;1,1,1;2,0,1;2,2,2":[[-2,-2,5],[3,-1,4],[0,2,3]],"W|-2,-1,2;-2,2,1;-1,-1,2;-1,0,2;-1,1,1;0,-2,1;0,0,1":[[1,-1,5],[-3,3,4],[0,-1,3]],"B|-1,-1,2;0,-2,1;0,0,1;1,-1,2;1,0,2;1,1,1;2,-1,2;2,2,1":[[3,3,5],[0,-1,4],[0,1,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,0,1":[[-2,-1,5],[0,-1,4],[0,1,3]],"B|-2,-1,1;-2,0,1;-1,-2,2;-1,-1,2;0,-1,2;0,0,1":[[-2,1,5],[-2,-3,4],[-1,0,3]],"W|-1,-2,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,0,2;2,-1,2":[[2,-2,5],[-2,-2,4],[0,-1,3]],"B|-1,-2,1;0,-2,1;0,0,1;1,-2,1;1,-1,2;1,0,2;2,-2,2;2,-1,2":[[-2,-2,5],[0,1,4],[0,-3,3]],"W|-2,-3,1;-2,-1,1;-2,0,1;-1,-2,2;-1,-1,2;0,-1,2;0,0,1":[[-2,-2,5],[-1,0,4],[-1,-3,3]],"B|-2,-3,1;-2,-2,2;-2,-1,1;-2,0,1;-1,-2,2;-1,-1,2;0,-1,2;0,0,1":[[-1,0,5],[-1,-3,4],[-3,-2,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,2;0,0,1":[[1,-2,5],[1,-1,4],[-2,1,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,1":[[2,-2,5],[-2,-2,4],[1,-1,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;2,-2,2":[[-2,-2,5],[-2,-1,4],[1,-1,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;1,0,2":[[-1,-2,5],[-2,-2,4],[2,-1,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,1":[[2,-3,5],[-2,1,4],[-1,1,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,0,1;0,1,2":[[1,-2,5],[-2,-1,4],[-2,-2,3]],"W|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,0,1;0,1,2;1,-2,1":[[2,-2,5],[-2,-2,4],[-2,-1,3]],"B|-1,-2,1;-1,-1,2;-1,0,2;0,-2,1;0,0,1;0,1,2;1,-2,1;2,-2,2":[[-2,-2,5],[-2,-1,4],[0,-1,3]],"W|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,1;2,0,1":[[3,0,5],[-1,-1,4],[1,0,3]],"B|-1,0,2;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,1;2,0,1;3,0,2":[[2,-2,5],[2,1,4],[0,-3,3]],"B|-1,-2,2;-1,-1,2;0,-2,1;0,0,1":[[0,-1,5],[-1,-3,4],[-1,0,3]],"W|-1,-2,2;-1,-1,2;0,-2,1;0,-1,1;0,0,1":[[0,-3,5],[0,1,4],[-1,0,3]],"B|-1,-2,2;-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1":[[0,1,5],[-1,0,4],[-1,-3,3]],"W|-1,-2,2;-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1":[[0,2,5],[-1,0,4],[-1,-3,3]],"B|-1,-2,2;-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,1;0,2,2":[[-1,0,5],[1,-4,4],[-2,-1,3]],"W|-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,-1,1;0,0,1":[[1,-4,5],[-2,-1,4],[0,1,3]],"B|-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,-1,1;0,0,1;1,-4,2":[[0,1,5],[-2,-1,4],[2,-5,3]],"B|-1,-2,2;-1,-1,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-3,5],[0,-4,4],[-1,-3,3]],"W|-1,-2,2;-1,-1,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-4,5],[-1,0,4],[-1,-3,3]],"B|-1,-2,2;-1,-1,2;0,-4,2;0,-3,1;0,-2,1;0,-1,1;0,0,1;0,1,2":[[-1,0,5],[-1,-3,4],[-1,1,3]],"W|-1,-2,2;-1,-1,2;0,-4,1;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-3,5],[-1,0,4],[-1,-3,3]],"B|-1,-2,2;-1,-1,2;0,-4,1;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[-1,0,5],[-1,-3,4],[1,-4,3]],"W|-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,0,1":[[-2,-1,5],[1,-1,4],[-2,-4,3]],"B|-2,-1,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,0,1":[[1,-1,5],[-2,-4,4],[0,-3,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-1,2":[[2,-4,5],[-2,0,4],[0,-3,3]],"B|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-4,2;2,-1,2":[[-2,0,5],[-2,-2,4],[1,1,3]],"W|-2,-4,1;-2,-1,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,0,1":[[1,-1,5],[-3,-5,4],[0,-1,3]],"B|-1,-1,2;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-4,1;2,-1,2":[[3,-5,5],[0,-1,4],[0,-3,3]],"B|-1,-1,2;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[0,-1,5],[-1,0,4],[-2,-1,3]],"W|-1,-1,2;0,-2,1;0,-1,1;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[0,-3,5],[0,1,4],[1,0,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[0,1,5],[1,0,4],[-1,-4,3]],"W|-1,-1,2;-1,0,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[0,-1,5],[2,-1,4],[1,0,3]],"B|-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[2,-1,5],[-2,-1,4],[1,0,3]],"B|-2,-4,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,0,1":[[0,-1,5],[1,-1,4],[-1,1,3]],"W|-2,-4,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,-1,1;0,0,1":[[0,-3,5],[0,1,4],[-1,0,3]],"B|-2,-4,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1":[[0,1,5],[-1,0,4],[1,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-4,2":[[-2,0,5],[0,-1,4],[-2,-2,3]],"B|-2,-4,2;-1,-3,1;-1,-2,2;-1,-1,2;0,-2,1;0,0,1;1,-1,1;2,0,2":[[0,-1,5],[2,-2,4],[-1,1,3]],"W|-1,-2,2;-1,-1,2;-1,0,1;0,-2,1;0,0,1":[[-2,-1,5],[0,-1,4],[0,-3,3]],"B|-2,-1,2;-1,-2,2;-1,-1,2;-1,0,1;0,-2,1;0,0,1":[[1,0,5],[-3,0,4],[0,-1,3]],"W|-1,0,1;0,-2,1;0,0,1;1,-2,2;1,-1,2;1,0,1;2,-1,2":[[2,0,5],[-2,0,4],[0,-1,3]],"B|-1,0,1;0,-2,1;0,0,1;1,-2,2;1,-1,2;1,0,1;2,-1,2;2,0,2":[[-2,0,5],[0,-3,4],[0,1,3]],"W|-2,-1,2;-2,0,1;-1,-2,2;-1,-1,2;0,-3,1;0,-1,1;0,0,1":[[0,-2,5],[-1,0,4],[-1,-3,3]],"B|-2,-1,2;-2,0,1;-1,-2,2;-1,-1,2;0,-3,1;0,-2,2;0,-1,1;0,0,1":[[-1,0,5],[1,-2,4],[-1,-3,3]],"B|-1,-2,2;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1":[[1,0,5],[1,-1,4],[-3,0,3]],"W|-1,-2,2;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,0,1":[[2,0,5],[-2,0,4],[1,-1,3]],"B|-1,-2,2;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,0,1;2,0,2":[[-2,0,5],[-2,-1,4],[1,-1,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;1,0,1":[[-1,0,5],[3,-4,4],[-2,0,3]],"B|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,2;1,0,1":[[2,-3,5],[-2,1,4],[1,-3,3]],"B|-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,0,1":[[1,0,5],[-2,-1,4],[-2,0,3]],"W|-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,0,1;1,0,1":[[2,0,5],[-2,0,4],[-2,-1,3]],"B|-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,0,1;1,0,1;2,0,2":[[-2,0,5],[0,-1,4],[-2,-1,3]],"W|-2,-1,1;-1,-2,2;-1,-1,2;-1,0,1;0,-3,2;0,-2,1;0,0,1":[[0,1,5],[-1,-3,4],[0,-1,3]],"B|-1,0,2;0,-1,1;0,0,1;1,-2,1;1,-1,2;2,-1,2;2,0,1;3,0,2":[[0,-2,5],[0,1,4],[2,-3,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1":[[1,-1,5],[-1,0,4],[-1,-2,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2":[[1,-2,5],[-2,0,4],[1,1,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,2":[[1,-3,5],[1,1,4],[-1,0,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,-2,2;1,-1,2":[[2,-4,5],[-2,0,4],[-1,0,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,-2,2;1,-1,2;2,-4,2":[[-2,0,5],[-2,-2,4],[1,1,3]],"W|-1,-1,1;-1,1,2;-1,2,2;0,0,1;0,1,2;0,2,1;1,1,1":[[2,2,5],[-2,-2,4],[-1,3,3]],"B|-1,-1,1;-1,1,2;-1,2,2;0,0,1;0,1,2;0,2,1;1,1,1;2,2,2":[[-2,-2,5],[-1,3,4],[1,0,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,0,2":[[2,-2,5],[-1,1,4],[-1,-3,3]],"W|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,-2,1;2,0,2":[[3,-3,5],[-1,1,4],[1,-2,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,-2,1;2,0,2;3,-3,2":[[-1,1,5],[1,-2,4],[-1,-2,3]],"W|-1,-1,1;-1,1,2;0,0,1;0,1,2;0,2,1;1,1,1;2,0,2":[[2,2,5],[-2,-2,4],[-1,2,3]],"B|-1,-1,1;-1,1,2;0,0,1;0,1,2;0,2,1;1,1,1;2,0,2;2,2,2":[[-2,-2,5],[2,1,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,1,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,-1,2;1,1,2":[[2,-4,5],[-2,0,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-3,1;1,-1,2;1,1,2;2,-4,2":[[-2,0,5],[1,-2,4],[1,0,3]],"W|-1,-1,2;-1,1,2;0,-2,1;0,-1,2;0,0,1;1,-1,1;2,0,1":[[-1,-3,5],[3,1,4],[-1,0,3]],"B|-1,-1,2;-1,1,2;-1,3,2;0,0,1;0,1,2;0,2,1;1,1,1;2,0,1":[[3,-1,5],[-1,0,4],[3,0,3]],"W|-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1":[[1,-1,5],[-2,-1,4],[1,0,3]],"B|-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-1,2":[[-2,-1,5],[2,-1,4],[1,0,3]],"W|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,1":[[-2,-1,5],[-1,0,4],[0,1,3]],"B|-2,-1,1;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;2,-1,2":[[3,-1,5],[1,0,4],[-2,0,3]],"W|-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;2,-1,1":[[-2,-1,5],[1,0,4],[-2,0,3]],"B|-2,-1,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,2":[[3,-1,5],[-1,0,4],[2,0,3]],"B|-2,-1,2;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1":[[1,-1,5],[-3,-1,4],[1,0,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,2":[[3,-1,5],[-1,0,4],[2,0,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,2;3,-1,2":[[4,-1,5],[-1,0,4],[2,0,3]],"W|-2,0,1;-1,-3,1;-1,-2,2;-1,-1,2;-1,0,2;0,-1,1;0,0,1":[[-1,1,5],[0,1,4],[0,-2,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,2;3,-1,1":[[-2,-1,5],[2,0,4],[-1,0,3]],"B|-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,0,2":[[1,-1,5],[-1,-2,4],[-2,-1,3]],"W|-1,-1,1;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1":[[1,-2,5],[-2,1,4],[1,1,3]],"W|-1,-2,1;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,0,2":[[1,-1,5],[-2,-1,4],[2,-1,3]],"B|-1,-1,2;-1,0,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;1,0,1":[[2,-1,5],[-2,-1,4],[-1,-2,3]],"W|-1,-2,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1":[[1,-1,5],[-2,-1,4],[1,-2,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2":[[2,-1,5],[-2,-1,4],[-1,-2,3]],"W|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,1":[[-2,-1,5],[-1,-2,4],[3,0,3]],"B|-2,-1,1;-1,-2,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;2,-1,2":[[3,-1,5],[1,-2,4],[-2,-2,3]],"W|-1,-2,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;2,-1,1":[[-2,-1,5],[-3,-1,4],[1,-2,3]],"B|-2,-1,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,2":[[3,-1,5],[-1,-2,4],[2,-2,3]],"B|-2,-1,1;-2,0,1;-1,-2,2;-1,-1,2;-1,0,2;0,0,1":[[-1,1,5],[-1,-3,4],[-2,1,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,2":[[3,-1,5],[2,-2,4],[-1,-2,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,2;3,-1,2":[[4,-1,5],[-1,-2,4],[2,-2,3]],"W|-2,-1,1;-2,0,1;-1,-3,1;-1,-2,2;-1,-1,2;-1,0,2;0,0,1":[[-1,1,5],[-2,1,4],[-2,-2,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,1;1,-1,2;2,-1,2;3,-1,1":[[-2,-1,5],[2,-2,4],[-1,-2,3]],"B|-1,-2,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,2":[[1,-1,5],[-1,0,4],[-2,-1,3]],"W|-1,-2,1;-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,1":[[-1,0,5],[2,-3,4],[-1,1,3]],"W|-1,-2,1;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-2,2":[[1,-1,5],[-2,-1,4],[2,-1,3]],"B|-1,-2,1;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1;1,-2,2;1,-1,2":[[-2,-1,5],[2,-1,4],[1,0,3]],"B|-1,-1,2;0,-2,1;0,0,1;0,1,2":[[1,-1,5],[-1,-2,4],[0,-1,3]],"W|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-1,2":[[1,1,5],[-2,0,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-1,2;1,1,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,-1,2;1,1,2":[[2,-4,5],[-2,0,4],[1,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,-1,2;1,1,2;2,-4,2":[[-2,0,5],[1,0,4],[2,1,3]],"W|-1,-1,2;-1,0,2;0,0,1;0,2,1;1,-1,2;1,1,1;2,0,1":[[3,-1,5],[-1,3,4],[0,-1,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,2,1;1,-1,2;1,1,1;2,0,1;3,-1,2":[[-1,3,5],[0,-1,4],[0,3,3]],"B|-1,-1,2;0,-2,1;0,0,1;0,1,2;1,-1,1;2,0,2":[[-1,1,5],[2,-2,4],[0,-1,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,2,2;1,-1,2;1,1,1;2,0,1":[[2,2,5],[-2,-2,4],[2,-1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,2,2;1,-1,2;1,1,1;2,0,1;2,2,2":[[-2,-2,5],[1,2,4],[0,1,3]],"W|-1,-1,2;0,-2,1;0,0,1;0,1,2;1,-1,1;2,-2,1;2,0,2":[[-1,1,5],[3,-3,4],[1,-2,3]],"B|-1,-1,2;-1,0,2;0,0,1;0,2,2;1,-1,2;1,1,1;2,0,1;2,2,1":[[3,3,5],[2,-1,4],[2,3,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-1,2;1,0,2":[[1,1,5],[1,-3,4],[-1,-2,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,2,1;1,1,1":[[2,2,5],[-2,-2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,2,1;1,1,1;2,2,2":[[-2,-2,5],[-1,3,4],[2,0,3]],"W|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,-1,2;1,0,2":[[2,-4,5],[-2,0,4],[1,1,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-3,1;1,-1,2;1,0,2;2,-4,2":[[1,1,5],[-2,0,4],[-1,-2,3]],"W|-1,-2,1;-1,-1,2;0,-2,1;0,0,1;0,1,2":[[-2,-1,5],[-1,0,4],[1,0,3]],"B|-1,0,2;0,0,1;1,-2,2;1,-1,2;2,-1,1;2,0,1":[[2,1,5],[0,-1,4],[1,0,3]],"W|-1,-2,1;0,-2,1;0,0,1;0,1,2;1,-2,1;1,-1,2;2,-1,2":[[2,-2,5],[-2,-2,4],[0,-1,3]],"B|-1,-2,1;0,-2,1;0,0,1;0,1,2;1,-2,1;1,-1,2;2,-2,2;2,-1,2":[[-2,-2,5],[-1,-1,4],[1,0,3]],"W|-1,0,2;0,-1,1;0,0,1;1,-2,2;1,-1,2;2,-1,1;2,0,1":[[1,0,5],[1,-3,4],[2,-2,3]],"B|-1,0,2;0,-1,1;0,0,1;1,-2,2;1,-1,2;1,0,2;2,-1,1;2,0,1":[[1,1,5],[1,-3,4],[2,-2,3]],"B|-1,-2,1;-1,-1,2;0,-2,1;0,0,1;0,1,2;1,0,2":[[1,-2,5],[-2,-2,4],[2,-1,3]],"W|-1,-2,1;-1,-1,2;0,-2,1;0,0,1;0,1,2;1,-2,1;1,0,2":[[2,-2,5],[-2,-2,4],[2,-1,3]],"B|-1,-2,1;-1,-1,2;0,-2,1;0,0,1;0,1,2;1,-2,1;1,0,2;2,-2,2":[[-2,-2,5],[2,-1,4],[-1,2,3]],"W|-1,0,2;0,-1,2;0,0,1;0,2,1;1,1,2;1,2,1;2,2,1":[[3,2,5],[-1,2,4],[-2,1,3]],"B|-1,0,2;0,-1,2;0,0,1;0,2,1;1,1,2;1,2,1;2,2,1;3,2,2":[[-1,2,5],[2,1,4],[0,1,3]],"W|-1,-1,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[0,-4,5],[0,-3,4],[-1,0,3]],"B|-1,-1,2;0,-4,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[1,-1,5],[1,-2,4],[1,0,3]],"W|-1,-1,1;0,-4,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2":[[1,1,5],[1,-3,4],[1,0,3]],"B|-1,-1,1;0,-4,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2;1,1,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-1,-1,2;0,-4,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,1":[[-1,0,5],[1,0,4],[2,-2,3]],"B|-1,-1,2;-1,0,2;0,-4,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,1":[[-1,-2,5],[2,-2,4],[1,0,3]],"B|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2":[[1,-1,5],[1,-2,4],[1,0,3]],"W|-1,-1,1;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2":[[1,1,5],[1,-3,4],[1,-2,3]],"B|-1,-1,1;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2;1,1,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-1,-1,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,1":[[-1,0,5],[1,0,4],[-1,-2,3]],"B|-1,-1,2;-1,0,2;0,-3,2;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,1":[[-1,-2,5],[-1,1,4],[-2,-1,3]],"W|-1,-1,2;-1,0,1;0,0,1":[[-2,0,5],[0,-1,4],[1,0,3],[0,1,2]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1":[[-2,0,5],[1,-3,4],[1,0,3]],"W|-2,0,1;-1,-1,2;0,-2,2;0,-1,1;0,0,1":[[-1,0,5],[1,-2,4],[1,0,3]],"B|-2,0,1;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1":[[-1,1,5],[-1,-2,4],[0,1,3]],"W|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,0,2":[[1,1,5],[2,-1,4],[-2,0,3]],"B|-1,-1,1;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;1,1,2;2,0,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-2,-1,1;-2,0,2;-1,-1,2;-1,0,1;0,-2,1;0,-1,2;0,0,1":[[1,-1,5],[0,1,4],[-3,-1,3]],"B|-1,-1,2;0,-2,1;0,-1,2;0,0,1;1,-1,2;1,0,1;2,-1,1;2,0,2":[[3,-2,5],[0,1,4],[-2,-1,3]],"B|-1,-2,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,1":[[1,0,5],[-1,0,4],[-2,-2,3]],"W|-1,-2,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;2,0,1":[[-1,0,5],[3,0,4],[1,-2,3]],"B|-1,-2,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;2,0,1":[[3,0,5],[0,1,4],[-1,-1,3]],"W|-1,-2,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,1":[[1,0,5],[1,-2,4],[-2,-2,3]],"B|-1,-2,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,2;2,0,1":[[1,-2,5],[0,1,4],[2,1,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,1":[[1,0,5],[1,1,4],[2,1,3]],"W|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;2,0,1":[[3,0,5],[-1,-2,4],[2,1,3]],"B|-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;2,0,1;3,0,2":[[2,1,5],[-1,-2,4],[0,1,3]],"W|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-1,2;1,0,1;2,0,2":[[1,1,5],[2,-1,4],[-2,0,3]],"B|-1,-1,1;0,-2,1;0,0,1;0,1,2;1,-1,2;1,0,1;1,1,2;2,0,2":[[1,-3,5],[-2,0,4],[-1,0,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,1":[[-1,-2,5],[-1,-3,4],[-2,0,3]],"B|-1,-2,2;-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,1":[[1,-2,5],[1,-1,4],[-1,0,3]],"W|-1,-2,2;-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,1;1,-2,1":[[-1,0,5],[2,-3,4],[1,-1,3]],"B|-1,-2,2;-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-3,1;1,-2,1":[[-1,-3,5],[-1,1,4],[1,-1,3]],"W|-1,-2,2;-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,1;1,-1,1":[[-1,-3,5],[-1,1,4],[-1,0,3]],"B|-1,-3,1;-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,-2,2;1,-1,2":[[1,0,5],[1,-4,4],[-1,-2,3]],"B|-1,-3,1;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,-1,2":[[-1,0,5],[-1,-1,4],[1,0,3]],"W|-1,-3,1;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,-1,2":[[-2,0,5],[2,-4,4],[1,-2,3]],"B|-1,-3,2;-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,1;1,0,1;2,0,2":[[1,-1,5],[-1,-2,4],[2,1,3]],"W|-1,-3,1;-1,-1,1;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,-1,2":[[1,-2,5],[1,-4,4],[1,0,3]],"B|-1,-3,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2":[[3,1,5],[-1,-2,4],[1,-2,3]],"W|-1,-3,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2;3,1,1":[[1,-2,5],[1,1,4],[1,-3,3]],"B|-1,-3,1;0,-2,2;0,-1,1;0,0,1;1,-2,2;1,-1,2;2,0,2;3,1,1":[[-1,-2,5],[-1,-1,4],[1,0,3]],"W|-1,-3,1;-1,-2,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2":[[3,1,5],[-1,-1,4],[-1,-4,3]],"B|-1,-3,1;-1,-2,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2;3,1,2":[[4,2,5],[-1,-1,4],[-2,-3,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,0,1":[[-2,0,5],[-1,-2,4],[1,-3,3]],"B|-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2":[[-1,-3,5],[3,1,4],[1,-2,3]],"W|-1,-3,1;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2":[[3,1,5],[1,-2,4],[1,-3,3]],"B|-1,-3,1;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2;3,1,2":[[4,2,5],[1,-2,4],[-2,0,3]],"W|-1,-3,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,0,1;2,0,2":[[3,1,5],[2,-1,4],[-1,2,3]],"B|-1,-3,1;0,-2,2;0,0,1;0,1,1;1,-1,2;1,0,1;2,0,2;3,1,2":[[4,2,5],[2,-1,4],[0,2,3]],"B|-1,-2,2;-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,0,1":[[1,-2,5],[-1,0,4],[-2,0,3]],"W|-1,-2,1;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-2,2;1,-1,2":[[1,0,5],[2,0,4],[-1,-3,3]],"B|-1,-2,1;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-2,2;1,-1,2;1,0,2":[[1,-3,5],[1,1,4],[-1,-1,3]],"W|-1,-2,2;-1,-1,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,0,1":[[-2,0,5],[2,0,4],[1,-2,3]],"B|-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-2,2;1,-1,2;1,0,1;2,0,2":[[-2,0,5],[-1,-3,4],[3,1,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,0,1":[[-2,0,5],[2,-4,4],[-1,0,3]],"W|-1,-3,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,1":[[-2,-4,5],[1,0,4],[1,-2,3]],"B|-2,-4,2;-1,-3,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,1":[[1,0,5],[-2,0,4],[3,0,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;1,-3,2;1,0,1;2,-4,1":[[-2,0,5],[-1,-2,4],[2,1,3]],"B|-2,-4,1;-1,-3,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-1,2;2,0,2":[[3,1,5],[1,-2,4],[-2,0,3]],"B|-1,-1,2;-1,0,1;0,0,1;1,0,2":[[0,-1,5],[0,1,4],[1,-1,3]],"W|-1,-1,2;-1,0,1;0,-1,1;0,0,1;0,1,2":[[1,0,5],[-2,0,4],[-2,1,3]],"B|-1,-1,2;-1,0,1;0,-1,1;0,0,1;0,1,2;1,0,2":[[-2,1,5],[1,-2,4],[-1,2,3]],"W|-1,-1,2;-1,0,1;0,-1,1;0,0,1;0,1,2;1,-2,1;1,0,2":[[2,-3,5],[-2,1,4],[2,-1,3]],"B|-1,-1,2;-1,0,1;0,-1,1;0,0,1;0,1,2;1,-2,1;1,0,2;2,-3,2":[[-2,1,5],[2,-1,4],[1,-1,3]],"B|-1,-1,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,0,2":[[1,-2,5],[-2,1,4],[-2,0,3]],"W|-1,-1,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;1,-2,1;1,0,2":[[-2,1,5],[2,-3,4],[-2,0,3]],"B|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;2,1,2":[[-2,-3,5],[2,0,4],[-1,-3,3]],"W|-1,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2;1,0,1;2,0,2":[[2,1,5],[-2,-3,4],[0,-2,3]],"B|-1,-2,1;0,-1,1;0,0,1;0,1,2;1,-1,2;1,0,1;2,0,2;2,1,2":[[-2,-3,5],[3,1,4],[0,-2,3]],"B|-1,-1,2;-1,0,1;0,-1,1;0,0,1;1,-2,2;1,0,2":[[0,1,5],[0,-2,4],[1,-1,3]],"W|-1,-1,2;-1,0,1;0,-1,1;0,0,1;0,1,1;1,-2,2;1,0,2":[[0,-2,5],[0,2,4],[1,-1,3]],"B|-1,-1,2;-1,0,1;0,-2,2;0,-1,1;0,0,1;0,1,1;1,-2,2;1,0,2":[[0,2,5],[1,2,4],[-2,-1,3]],"W|-1,-1,2;-1,0,1;0,-2,1;0,-1,1;0,0,1;1,-2,2;1,0,2":[[0,1,5],[0,-3,4],[1,-1,3]],"B|-1,-1,2;-1,0,1;0,-2,1;0,-1,1;0,0,1;0,1,2;1,-2,2;1,0,2":[[0,-3,5],[1,-1,4],[-1,2,3]],"W|-1,-1,2;-1,0,1;0,0,1;0,1,1;1,0,2":[[0,-1,5],[0,2,4],[-2,0,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;0,1,1;1,0,2":[[-2,-1,5],[1,-1,4],[-1,1,3]],"W|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;1,0,1":[[1,-2,5],[-2,1,4],[-3,2,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;1,-2,2;1,0,1":[[2,-3,5],[-2,1,4],[1,1,3]],"B|-1,-1,2;-1,0,1;0,0,1;0,1,1;0,2,2;1,0,2":[[-2,-1,5],[1,2,4],[0,-1,3]],"W|-1,-2,1;-1,-1,2;0,-1,1;0,0,1;0,1,2;1,0,1;2,0,2":[[2,1,5],[-2,-3,4],[1,1,3]],"B|-1,-2,1;-1,-1,2;0,-1,1;0,0,1;0,1,2;1,0,1;2,0,2;2,1,2":[[-2,-3,5],[-3,-4,4],[1,-1,3]],"W|-1,-1,2;-1,0,1;0,0,1;0,1,1;0,2,2;1,0,2;1,2,1":[[-2,-1,5],[2,3,4],[0,-1,3]],"B|-1,-2,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,0,1;1,1,2;2,1,2":[[-2,-3,5],[0,1,4],[2,-1,3]],"B|-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,1":[[-1,-2,5],[2,0,4],[2,1,3]],"W|-1,-2,1;-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,1":[[-2,-3,5],[2,1,4],[1,-3,3]],"B|-1,0,1;0,-1,2;0,0,1;0,1,1;0,2,2;1,1,2;1,2,1;2,3,2":[[-2,-1,5],[-2,0,4],[2,0,3]],"W|-1,-1,2;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,1;2,0,1":[[-1,0,5],[3,0,4],[1,-3,3]],"B|-1,-1,2;-1,0,2;0,-2,2;0,-1,1;0,0,1;0,1,2;1,0,1;2,0,1":[[-1,-2,5],[3,0,4],[-1,1,3]],"W|-1,-1,1;-1,0,2;0,0,1;1,-1,2;1,0,1":[[0,-1,5],[0,1,4],[1,1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1":[[-2,-2,5],[1,1,4],[1,-2,3]],"W|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1":[[3,-3,5],[-1,1,4],[2,1,3]],"B|-1,-1,2;-1,0,1;0,-1,2;0,0,1;1,-1,1;1,0,2;2,-2,1;3,-3,2":[[-1,1,5],[2,1,4],[-1,-2,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,0,1;0,1,2;1,0,2;1,1,1":[[-2,-2,5],[2,2,4],[2,-1,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;1,1,1;2,2,2":[[-2,-2,5],[1,-2,4],[-2,1,3]],"B|-1,-1,1;-1,0,2;0,0,1;0,1,2;1,-1,2;1,0,1":[[1,1,5],[-2,-2,4],[-2,-1,3]],"W|-1,-1,2;-1,0,1;0,0,1;0,1,2;1,-1,1;1,0,2;2,-2,1":[[-1,1,5],[3,-3,4],[2,-1,3]],"B|-1,-1,2;-1,0,1;-1,1,2;0,-1,2;0,0,1;1,0,2;1,1,1;2,2,1":[[3,3,5],[2,1,4],[-2,-1,3]],"B|-1,-1,1;-1,0,2;0,0,1;1,-1,2;1,0,1;1,1,2":[[0,1,5],[0,-1,4],[0,-2,3]],"W|-1,-1,1;-1,0,2;0,0,1;0,1,1;1,-1,2;1,0,1;1,1,2":[[0,-1,5],[0,2,4],[2,0,3]],"B|-1,-1,1;-1,0,2;-1,1,2;0,-1,2;0,0,1;0,1,1;1,0,1;1,1,2":[[-1,2,5],[2,-1,4],[1,-2,3]],"W|-1,-1,1;-1,0,1;-1,1,2;0,-1,2;0,0,1;0,1,1;1,1,2":[[-2,0,5],[1,0,4],[0,2,3]],"B|-1,-1,1;-1,0,2;0,-2,2;0,-1,1;0,0,1;1,-1,2;1,0,1;1,1,2":[[2,1,5],[-1,-2,4],[2,0,3]]};
 
-/* ---------------- 五、对外接口 ---------------- */
+/* ---------------- 五、对外接口 ----------------
+ * ★ 查询类函数必须经 publicFn() 包装：页面与测试会**直接改写 AI.board**（不走 enterMove），
+ *   包装层负责“影子棋盘比对 → 必要时整体重建增量棋型结构”，保证读到的棋型/威胁/评估
+ *   永远与棋盘一致。若接口退化成裸函数引用，就会出现“外部改盘后读到过期缓存、
+ *   所有局面都返回同一个点”的隐蔽故障（改造过程中真实踩到过）。 */
   return {
     /* 常量 */
     EMPTY, BLACK, WHITE, DIRECTIONS,
@@ -1538,18 +2102,64 @@ const OPENING_BOOK = {"B|":[[0,0,5]],"W|0,0,1":[[-1,0,5],[0,-1,4],[0,1,3],[1,0,2
     setColors(me, opp) { playerColor = me; aiColor = opp; },
     setMoveVariety(v) { moveVariety = v; },
 
-    /* 决策与查询 */
-    getBestMove, bestBySearch, bestByScore, searchDepth, inBoard,
-    findImmediateWin, threatLevel, countThreats, canWinNow, scoreFor,
-    evaluateBoard, evaluateCell, lineInfo, lineScore,
-    getCandidateMoves, forcingMovesOf, resolveThreats,
-    findVcfWin, findVctWin, findDoubleThreat, findDoubleKill, findOpponentDoubleThreat,
-    pickVaried, pickTopN, bookMove, openingMove,
+    /* 决策与查询
+     * ★ 全部经 publicFn 包装：页面/测试会直接改写 AI.board（不经 enterMove），
+     *   包装层先做一次"影子棋盘比对 → 必要时整体重建增量结构"，保证读到的
+     *   棋型/威胁/评估永远与棋盘一致。内部调用链（搜索每节点）由 evalSyncDepth
+     *   短路，不会产生额外开销。 */
+    getBestMove: publicFn(getBestMove),
+    bestBySearch: publicFn(bestBySearch),
+    bestByScore: publicFn(bestByScore),
+    searchDepth: publicFn(searchDepth),
+    inBoard,
+    findImmediateWin: publicFn(findImmediateWin),
+    threatLevel: publicFn(threatLevel),
+    countThreats: publicFn(countThreats),
+    canWinNow: publicFn(canWinNow),
+    scoreFor: publicFn(scoreFor),
+    evaluateBoard: publicFn(evaluateBoard),
+    evaluateCell: publicFn(evaluateCell),
+    lineInfo,
+    lineScore,
+    getCandidateMoves: publicFn(getCandidateMoves),
+    forcingMovesOf: publicFn(forcingMovesOf),
+    resolveThreats: publicFn(resolveThreats),
+    findVcfWin: publicFn(findVcfWin),
+    findVctWin: publicFn(findVctWin),
+    findDoubleThreat: publicFn(findDoubleThreat),
+    findDoubleKill: publicFn(findDoubleKill),
+    findOpponentDoubleThreat: publicFn(findOpponentDoubleThreat),
+    pickVaried: publicFn(pickVaried),
+    pickTopN: publicFn(pickTopN),
+    bookMove: publicFn(bookMove),
+    openingMove: publicFn(openingMove),
     /* 测试与调试用的内部函数（保持与旧测试脚本一致的可调用面） */
-    comboBonus, threatSpaceBonus, directionScore, initSearchTables, hashXor,
+    comboBonus: publicFn(comboBonus),
+    threatSpaceBonus: publicFn(threatSpaceBonus),
+    directionScore,
+    initSearchTables: publicFn(initSearchTables),
+    hashXor,
+    /* 增量结构自检接口：供不变量测试直接读取内部状态 */
+    ensureEvalState,
+    evalStats() {
+      ensureEvalState();
+      return {
+        lineSum: [lineSum[BLACK], lineSum[WHITE]],
+        adjSum: [adjSum[BLACK], adjSum[WHITE]],
+        posSum: [posSum[BLACK], posSum[WHITE]],
+        fiveCnt: [fiveCnt[BLACK], fiveCnt[WHITE]],
+        dblCnt: [dblCnt[BLACK], dblCnt[WHITE]],
+        spaceSum: [spaceSum[BLACK], spaceSum[WHITE]],
+        cellSum: cgSum.map((a) => Array.from(a)),
+        cellLv: cgLv.map((a) => Array.from(a)),
+        cellThr: cgThr.map((a) => Array.from(a)),
+        cellFive: cgFive.map((a) => Array.from(a)),
+        pieceCount,
+      };
+    },
   };
 
-  /* 换局/换棋盘时清空搜索缓存，避免旧局面数据串味 */
+  /* 换局/换棋盘时清空搜索缓存与增量评估缓存，避免旧局面数据串味 */
   function resetState() {
     searchState = null;
     lastVcfPath = null;
@@ -1558,5 +2168,11 @@ const OPENING_BOOK = {"B|":[[0,0,5]],"W|0,0,1":[[-1,0,5],[0,-1,4],[0,1,3],[1,0,2
     historyTable = null;
     killerTable = null;
     boardHash = 0;
+    boardHashLo = 0;
+    boardHashHi = 0;
+    ttGen = 0;
+    evalReady = false;
+    evalSyncDepth = 0;
+    pieceCount = 0;
   }
 });

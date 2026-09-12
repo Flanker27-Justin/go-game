@@ -55,12 +55,17 @@ if (sec7) {
     /positions-test/.test(body) ? '已收录' : '**未收录** positions-test / verify-page-runtime 等');
 }
 
-/* 3b. 一键启动脚本是否被记录、且文件确实存在 */
+/* 3b. 异地联机一键启动脚本是否被记录、且文件确实存在 */
 {
-  const bat = path.join(ROOT, 'outputs', '启动五子棋.bat');
-  const ps1 = path.join(ROOT, 'outputs', '启动五子棋.ps1');
-  add(fs.existsSync(bat) && fs.existsSync(ps1), '一键启动脚本是否存在', `bat=${fs.existsSync(bat)} ps1=${fs.existsSync(ps1)}`);
-  add(doc.includes('启动五子棋.bat'), '文档是否介绍一键启动', doc.includes('启动五子棋.bat') ? '已介绍' : '**未介绍**');
+  const bat = path.join(ROOT, 'outputs', '启动异地联机.bat');
+  const ps1 = path.join(ROOT, 'outputs', '启动异地联机.ps1');
+  add(fs.existsSync(bat) && fs.existsSync(ps1), '异地联机启动脚本是否存在', `bat=${fs.existsSync(bat)} ps1=${fs.existsSync(ps1)}`);
+  add(doc.includes('启动异地联机.bat'), '文档是否介绍异地联机启动', doc.includes('启动异地联机.bat') ? '已介绍' : '**未介绍**');
+  /* 文档应把「异地 + cpolar」作为联机主线，而不是局域网 */
+  add(!/启动联网版/.test(doc) && !/启动五子棋\.bat/.test(doc), '是否已清理旧的局域网版启动脚本引用',
+    (/启动联网版/.test(doc) || /启动五子棋\.bat/.test(doc)) ? '**仍残留旧脚本引用**' : '已清理');
+  add(/cpolar/.test(doc) && /公网/.test(doc), '文档是否说明异地方案依赖 cpolar 与公网地址',
+    /cpolar/.test(doc) ? '已说明' : '**未说明**');
   /* bat 里的中文只允许出现在“必须引用的中文文件名”上；除此之外全是 ASCII。
    * 中文文件名的 UTF-8 编码约 18 字节/次，脚本里引用两次 → 上限取 80 字节。 */
   if (fs.existsSync(bat)) {

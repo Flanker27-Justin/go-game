@@ -129,6 +129,30 @@ const PATTERN_TABLE = [
   [1000000, 1000000, 1000000], // 5 子及以上：已成五连
 ];
 
+/* ---------------- 增量棋型引擎与深搜所需常量（强度改造新增） ---------------- */
+/* 成五分值：lineScore 对 count>=5 返回 PATTERN_TABLE[5][0]，据此可 O(1) 判定"该点能成五" */
+const FIVE_SCORE = 1000000;
+
+/* 威胁空间权重（按威胁等级 0~4）：与旧 threatSpaceBonus 的 [0,600,2000,15000,80000] 一致 */
+const SPACE_WEIGHT = [0, 600, 2000, 15000, 80000];
+
+/* 静止搜索（quiescence）：叶节点只延展冲四/活四/必须的挡点，看穿"静态评估看不见"的杀棋链。
+ * 上限既控制耗时，也保证 VCF 一类的连续冲四能被看穿到 8 手以上。 */
+const QUIESCE_MAX_PLIES = 8;
+
+/* 搜索节点上限保护：极端局面下防止单个节点展开失控 */
+const MAX_MOVES_PER_NODE = 48;
+
+/* 着法池容量：用共享数组代替每节点分配小数组，避免深搜时 GC 抖动。
+ * 深度上限约 (searchDepth 12 + 静止 8) 层、每层最多 48 个着法，8192 有充足余量。 */
+const MOVE_POOL_SIZE = 16384;
+
+/* 搜索用的"无穷大"（必须显著大于 WIN_SCORE 且参与取负运算仍然安全） */
+const INF_SCORE = 1e10;
+
+/* 置换表淘汰代龄：不清空整表，只淘汰两代之前的旧条目 */
+const TT_SWEEP_KEEP_GENS = 2;
+
 /* ---------------- 二、引擎状态 ---------------- */
 /* 棋盘：引擎自己持有，游戏侧通过 GomokuAI.board 直接读写（不要重新赋值棋盘变量） */
 let boardSize = 19;
@@ -153,6 +177,337 @@ let killerTable = null;       // 杀手表
 /** (r, c) 是否在棋盘范围内 */
 function inBoard(r, c) {
   return r >= 0 && r < boardSize && c >= 0 && c < boardSize;
+}
+
+/* ============================================================
+ * 五、增量棋型引擎（强度改造的核心）
+ * ------------------------------------------------------------
+ * 旧实现的问题：minimax 的每个节点都重算整盘棋型——findImmediateWin×2、
+ * forcingMovesOf×2~3、叶节点 evaluateBoard（全盘 361×4 次 lineInfo + comboBonus
+ * 的 128 次 countThreats + threatSpaceBonus 的双方各 48 次 threatLevel），
+ * 一个节点上千次 lineInfo，导致有效深度只有 3 层、83% 的着法被迫由固定战术阶梯决定。
+ *
+ * 本段把"整盘重算"换成"落子增量维护"：
+ *   lineSum[color]        全盘连线棋型分之和（按"连续段起点"计一次，与旧口径一致）
+ *   cgSum/cgLv/cgThr/cgFive  每个空位落某色后的棋型分/威胁等级/有效威胁方向数/能否成五
+ *   fiveCnt/dblCnt/spaceSum  上一行的三个聚合量，供 O(1) 判必杀、双威胁、威胁空间
+ *   adjSum/posSum/near2   连接性、中心权重、候选点邻域过滤（切比雪夫距离≤2 内有子）
+ *
+ * 一致性约定（重要）：引擎内部任何落子/撤销都必须走 enterMove / leaveMove；
+ * 外部代码（页面、测试）直接改写 AI.board 时由 ensureEvalState() 用影子棋盘
+ * 比对发现并整体重建，对外接口统一由 publicFn 包装完成这一步。
+ * ============================================================ */
+
+/** 按当前 boardSize 分配全部增量结构（棋盘尺寸变化时重建） */
+function allocEvalTables() {
+  const n = boardSize * boardSize;
+  evalSize = boardSize;
+  shadowBoard = new Uint8Array(n);
+  patScore = []; patLv = []; cgSum = []; cgLv = []; cgThr = []; cgFive = []; cgWeight = [];
+  for (let s = 0; s < 2; s++) {
+    patScore[s] = []; patLv[s] = [];
+    for (let d = 0; d < 4; d++) {
+      patScore[s][d] = new Int32Array(n);
+      patLv[s][d] = new Uint8Array(n);
+    }
+    cgSum[s] = new Int32Array(n);
+    cgLv[s] = new Uint8Array(n);
+    cgThr[s] = new Uint8Array(n);
+    cgFive[s] = new Uint8Array(n);
+    cgWeight[s] = new Int32Array(n);
+  }
+  lineTot = [
+    new Float64Array(boardSize * 2),
+    new Float64Array(boardSize * 2),
+    new Float64Array((boardSize * 2 - 1) * 2),
+    new Float64Array((boardSize * 2 - 1) * 2),
+  ];
+  adjCell = new Int8Array(n * 2);
+  posCell = new Int16Array(n * 2);
+  near2 = new Int16Array(n);
+  evalReady = false;
+}
+
+/** 方向 dir 上第 id 条线的编号（用于 lineTot 索引） */
+function lineIdOf(dir, r, c) {
+  if (dir === 0) return r;
+  if (dir === 1) return c;
+  if (dir === 2) return r - c + boardSize - 1;
+  return r + c;
+}
+
+/** 方向 dir 上第 id 条线的起点坐标 */
+function lineStartOf(dir, id) {
+  if (dir === 0) return [id, 0];
+  if (dir === 1) return [0, id];
+  if (dir === 2) {
+    const rr = Math.max(0, id - (boardSize - 1));
+    return [rr, rr - id + boardSize - 1];
+  }
+  const rr = id < boardSize ? 0 : id - boardSize + 1;
+  return [rr, id - rr];
+}
+
+/**
+ * 单趟扫描一条线，累加 color 的全部棋型分（只对每个连续段的起点计一次分）。
+ * 与旧 lineInfo + lineScore 的口径严格等价：
+ *   段起点处 count = 1 + min(左侧连子,4) + min(右侧连子,4)（≥5 时一律按成五计），
+ *   两端"紧邻连续空位数"各最多 4 个，reachable = count + 空位总数 >= 5。
+ */
+function scoreRunsOnLine(startR, startC, dr, dc, color) {
+  let total = 0;
+  let r = startR, c = startC;
+  while (inBoard(r, c)) {
+    if (board[r][c] !== color) { r += dr; c += dc; continue; }
+    let count = 0, rr = r, cc = c;
+    while (inBoard(rr, cc) && board[rr][cc] === color) { count++; rr += dr; cc += dc; }
+    let ls = 0, ar = r - dr, ac = c - dc;
+    while (ls < 4 && inBoard(ar, ac) && board[ar][ac] === EMPTY) { ls++; ar -= dr; ac -= dc; }
+    let rs = 0;
+    while (rs < 4 && inBoard(rr, cc) && board[rr][cc] === EMPTY) { rs++; rr += dr; cc += dc; }
+    const cnt = count > 9 ? 9 : count;
+    const open = (ls > 0 ? 1 : 0) + (rs > 0 ? 1 : 0);
+    total += lineScore(cnt, open, cnt + ls + rs >= 5);
+    r = rr; c = cc;
+  }
+  return total;
+}
+
+/** 重算方向 dir 上第 id 条线对双方的棋型总分，并更新 lineSum */
+function recomputeLine(dir, id) {
+  const st = lineStartOf(dir, id);
+  const dr = DIRECTIONS[dir][0], dc = DIRECTIONS[dir][1];
+  const o = id * 2;
+  const nb = scoreRunsOnLine(st[0], st[1], dr, dc, BLACK);
+  const nw = scoreRunsOnLine(st[0], st[1], dr, dc, WHITE);
+  lineSum[BLACK] += nb - lineTot[dir][o];
+  lineSum[WHITE] += nw - lineTot[dir][o + 1];
+  lineTot[dir][o] = nb;
+  lineTot[dir][o + 1] = nw;
+}
+
+/** 空位 i 落 color 后，方向 d 上的棋型分与威胁等级（与 lineScore/threatLevel 同口径） */
+function computePatAt(i, d, color) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const info = lineInfo(r, c, DIRECTIONS[d][0], DIRECTIONS[d][1], color);
+  const score = lineScore(info.count, info.open, info.reachable);
+  let lv = 0;
+  if (info.count >= 5) lv = 4;
+  else if (info.count === 4 && info.open === 2) lv = 3;
+  else if (info.count === 4 && info.open === 1) lv = 2;
+  else if (info.count === 3 && info.open === 2) lv = 1;
+  return [score, lv];
+}
+
+/** i 的八邻域内是否有 color 棋子（与旧 threatSpaceBonus 的邻域口径一致） */
+function adjacentToColor(i, color) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const nr = r + dr, nc = c + dc;
+      if (inBoard(nr, nc) && board[nr][nc] === color) return true;
+    }
+  }
+  return false;
+}
+
+/** 由 (i, s) 的四个方向棋型值重建该格聚合量，并同步 fiveCnt/dblCnt/spaceSum */
+function refreshCellAgg(i, s) {
+  const oldFive = cgFive[s][i], oldThr = cgThr[s][i], oldW = cgWeight[s][i];
+  let sum = 0, thr = 0, lv = 0, five = 0;
+  for (let d = 0; d < 4; d++) {
+    const v = patScore[s][d][i];
+    sum += v;
+    const l = patLv[s][d][i];
+    if (l > lv) lv = l;
+    if (v >= LIVE_THREE_SCORE) thr++;
+    if (v >= FIVE_SCORE) five = 1;
+  }
+  cgSum[s][i] = sum;
+  cgLv[s][i] = lv;
+  cgThr[s][i] = thr;
+  cgFive[s][i] = five;
+  let w = 0;
+  if (lv >= 1 && adjacentToColor(i, s + 1)) w = SPACE_WEIGHT[lv];
+  cgWeight[s][i] = w;
+  const color = s + 1;
+  if (oldFive !== five) fiveCnt[color] += five ? 1 : -1;
+  if ((oldThr >= 2) !== (thr >= 2)) dblCnt[color] += (thr >= 2) ? 1 : -1;
+  spaceSum[color] += w - oldW;
+}
+
+/** 重算单格在 dir 方向上的棋型（该方向上受落子影响的格子只需重算这一维） */
+function refreshCellDir(i, d) {
+  for (let s = 0; s < 2; s++) {
+    const p = computePatAt(i, d, s + 1);
+    patScore[s][d][i] = p[0];
+    patLv[s][d][i] = p[1];
+    refreshCellAgg(i, s);
+  }
+}
+
+/** 重算单格全部四个方向的棋型（空位）或清零（已被占用） */
+function refreshCellPatAll(i) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const empty = board[r][c] === EMPTY;
+  for (let s = 0; s < 2; s++) {
+    if (empty) {
+      for (let d = 0; d < 4; d++) {
+        const p = computePatAt(i, d, s + 1);
+        patScore[s][d][i] = p[0];
+        patLv[s][d][i] = p[1];
+      }
+    } else {
+      for (let d = 0; d < 4; d++) { patScore[s][d][i] = 0; patLv[s][d][i] = 0; }
+    }
+    refreshCellAgg(i, s);
+  }
+}
+
+/** 重算单格的连接数与中心权重 */
+function refreshCellAdjPos(i) {
+  const r = (i / boardSize) | 0, c = i - r * boardSize;
+  const color = board[r][c];
+  for (let s = 0; s < 2; s++) {
+    const k = i * 2 + s;
+    adjSum[s + 1] -= adjCell[k];
+    posSum[s + 1] -= posCell[k];
+    let a = 0, p = 0;
+    if (color === s + 1) {
+      for (const dir of DIRECTIONS) {
+        const nr = r + dir[0], nc = c + dir[1];
+        if (inBoard(nr, nc) && board[nr][nc] === color) a++;
+      }
+      const center = (boardSize - 1) / 2;
+      p = boardSize - (Math.abs(r - center) + Math.abs(c - center));
+    }
+    adjCell[k] = a;
+    posCell[k] = p;
+    adjSum[s + 1] += a;
+    posSum[s + 1] += p;
+  }
+}
+
+/** 维护 near2（切比雪夫距离 ≤2 的棋子数），用于候选点过滤 */
+function touchNear2(r, c, delta) {
+  for (let dr = -HINT_RADIUS; dr <= HINT_RADIUS; dr++) {
+    for (let dc = -HINT_RADIUS; dc <= HINT_RADIUS; dc++) {
+      if (!dr && !dc) continue;
+      const nr = r + dr, nc = c + dc;
+      if (inBoard(nr, nc)) near2[nr * boardSize + nc] += delta;
+    }
+  }
+}
+
+/**
+ * 棋盘在 (r, c) 处发生变化后刷新全部增量结构。进入前 board[r][c] 已是新值。
+ * 影响的格子只有"过 (r,c) 的四条线上 ±4 范围内的格子"（因为棋型只看连续段，
+ * 距离更远的格子结构不变），每个这样的格子只需重算它在这个方向上的棋型。
+ */
+function refreshEvalAt(r, c) {
+  const i = r * boardSize + c;
+  shadowBoard[i] = board[r][c];
+  for (let d = 0; d < 4; d++) recomputeLine(d, lineIdOf(d, r, c));
+  refreshCellAdjPos(i);
+  for (let d = 0; d < 4; d++) {
+    const nr = r + DIRECTIONS[d][0], nc = c + DIRECTIONS[d][1];
+    if (inBoard(nr, nc)) refreshCellAdjPos(nr * boardSize + nc);
+  }
+  refreshCellPatAll(i);
+  for (let d = 0; d < 4; d++) {
+    const dr = DIRECTIONS[d][0], dc = DIRECTIONS[d][1];
+    for (let k = 1; k <= 4; k++) {
+      for (let sg = 1; sg >= -1; sg -= 2) {
+        const nr = r + dr * k * sg, nc = c + dc * k * sg;
+        if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
+        refreshCellDir(nr * boardSize + nc, d);
+      }
+    }
+  }
+}
+
+/** 落子并维护全部增量结构（引擎内部唯一允许的落子方式） */
+function enterMove(r, c, color) {
+  board[r][c] = color;
+  hashXor(r, c, color);
+  pieceCount++;
+  touchNear2(r, c, 1);
+  refreshEvalAt(r, c);
+}
+
+/** 撤销落子并维护全部增量结构（与 enterMove 严格对称） */
+function leaveMove(r, c, color) {
+  board[r][c] = EMPTY;
+  hashXor(r, c, color);
+  pieceCount--;
+  touchNear2(r, c, -1);
+  refreshEvalAt(r, c);
+}
+
+/** 整盘重建增量结构（初始化、换棋盘、检测到外部直接改写棋盘时调用） */
+function rebuildEvalState() {
+  if (!patScore || evalSize !== boardSize) allocEvalTables();
+  for (let s = 0; s < 2; s++) {
+    for (let d = 0; d < 4; d++) { patScore[s][d].fill(0); patLv[s][d].fill(0); }
+    cgSum[s].fill(0); cgLv[s].fill(0); cgThr[s].fill(0); cgFive[s].fill(0); cgWeight[s].fill(0);
+  }
+  for (let d = 0; d < 4; d++) lineTot[d].fill(0);
+  adjCell.fill(0); posCell.fill(0); near2.fill(0);
+  lineSum[BLACK] = 0; lineSum[WHITE] = 0;
+  adjSum[BLACK] = 0; adjSum[WHITE] = 0;
+  posSum[BLACK] = 0; posSum[WHITE] = 0;
+  fiveCnt[BLACK] = 0; fiveCnt[WHITE] = 0;
+  dblCnt[BLACK] = 0; dblCnt[WHITE] = 0;
+  spaceSum[BLACK] = 0; spaceSum[WHITE] = 0;
+  pieceCount = 0;
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      const v = board[r][c];
+      shadowBoard[r * boardSize + c] = v;
+      if (v !== EMPTY) { pieceCount++; touchNear2(r, c, 1); }
+    }
+  }
+  for (let d = 0; d < 4; d++) {
+    const nLines = d < 2 ? boardSize : boardSize * 2 - 1;
+    for (let id = 0; id < nLines; id++) recomputeLine(d, id);
+  }
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      const i = r * boardSize + c;
+      refreshCellAdjPos(i);
+      refreshCellPatAll(i);
+    }
+  }
+  evalReady = true;
+}
+
+/** 影子棋盘比对：外部是否直接改写过 AI.board */
+function boardTouchedExternally() {
+  if (!shadowBoard || evalSize !== boardSize) return true;
+  for (let r = 0; r < boardSize; r++) {
+    const row = board[r];
+    const base = r * boardSize;
+    for (let c = 0; c < boardSize; c++) if (row[c] !== shadowBoard[base + c]) return true;
+  }
+  return false;
+}
+
+/** 保证增量结构与棋盘一致（对外入口先做一次；内部调用链中用 evalSyncDepth 短路） */
+function ensureEvalState() {
+  if (evalSyncDepth > 0) return;
+  if (evalReady && !boardTouchedExternally()) return;
+  rebuildEvalState();
+}
+
+/** 把内部函数包装成对外入口：先对齐增量评估状态，避免外部改写棋盘后读到过期数据 */
+function publicFn(fn) {
+  return function () {
+    if (evalSyncDepth === 0) ensureEvalState();
+    evalSyncDepth++;
+    try { return fn.apply(null, arguments); }
+    finally { evalSyncDepth--; }
+  };
 }
 
 /**
@@ -783,6 +1138,17 @@ function bestByScore(me = aiColor, opp = playerColor, level) {
 
 /** 假设在 (r, c) 放一颗 color 棋，四个方向连子得分之和（含组合加权） */
 function evaluateCell(r, c, color) {
+  // 强度改造：空位读增量表（= 四方向棋型分之和），省掉每个候选点的 4 次 lineInfo
+  if (evalReady && board[r][c] === EMPTY) {
+    let total = cgSum[color - 1][r * boardSize + c];
+    if (total >= LIVE_THREE_SCORE * 2) total *= 2;
+    return total;
+  }
+  return evaluateCellRef(r, c, color);
+}
+
+/** 单点启发式参考实现（增量表未就绪或点上有子时使用） */
+function evaluateCellRef(r, c, color) {
   let total = 0;
   for (const [dr, dc] of DIRECTIONS) {
     total += directionScore(r, c, dr, dc, color);
@@ -861,6 +1227,13 @@ function lineScore(count, open, reachable) {
  * @returns {number} 0=普通落子 1=活三 2=冲四 3=活四 4=五连
  */
 function threatLevel(r, c, color) {
+  // 强度改造：空位直接读增量表（O(1)，旧实现每个节点要跑 4 次 lineInfo）
+  if (evalReady && board[r][c] === EMPTY) return cgLv[color - 1][r * boardSize + c];
+  return threatLevelRef(r, c, color);
+}
+
+/** 威胁等级参考实现（增量表未就绪、或查询点上已有棋子时使用，保持旧口径不变） */
+function threatLevelRef(r, c, color) {
   let best = 0;
   for (const [dr, dc] of DIRECTIONS) {
     const info = lineInfo(r, c, dr, dc, color);
@@ -878,29 +1251,25 @@ function threatLevel(r, c, color) {
  * 一步必杀检测：若在 (r, c) 放 color 能立刻成五则返回该点。
  * 用 canWinNow 直接数连子，不修改棋盘，速度比“临时落子再判胜”快得多。 */
 function findImmediateWin(color) {
-  // 成五点必然紧邻同色棋子（五连中除当前点外的 4 颗都在半径 1 内），
-  // 只查同色棋子相邻 8 格的空位即可，避免每个搜索节点全盘扫描 361 格。
-  const seen = new Set();
+  // 强度改造：直接读增量表（fiveCnt 为 0 时 O(1) 返回 null，旧实现每节点要扫全盘邻域）
+  if (!evalReady) ensureEvalState();
+  if (fiveCnt[color] === 0) return null;
+  const f = cgFive[color - 1];
   for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (canWinNow(nr, nc, color)) return [nr, nc];
-        }
-      }
-    }
+    const base = r * boardSize;
+    for (let c = 0; c < boardSize; c++) if (f[base + c]) return [r, c];
   }
   return null;
 }
 
 /** 快速判断：把 color 放在 (r, c) 后是否形成五连（不修改棋盘） */
 function canWinNow(r, c, color) {
+  if (evalReady && board[r][c] === EMPTY) return cgFive[color - 1][r * boardSize + c] !== 0;
+  return canWinNowRef(r, c, color);
+}
+
+/** canWinNow 的参考实现（直接数连子，不修改棋盘） */
+function canWinNowRef(r, c, color) {
   for (const [dr, dc] of DIRECTIONS) {
     let count = 1;
     for (const dir of [1, -1]) {
@@ -1071,82 +1440,34 @@ function getCandidateMoves(limit, color) {
  * 能延伸成活四的选点多的一方更主动；对方威胁空间越大，越不能安心进攻。
  * 与 comboBonus 的分工：comboBonus 只奖励“一手双威胁”的杀招点，这里把
  * 普通单线威胁也算进来，让叶节点评估不再只盯着必杀点、有全局大局观。
- * 数量上限 cap 控制评估开销（minimax 叶节点调用非常频繁）。 */
+ * 强度改造后由增量表维护（spaceSum），O(1) 读取；参数 cap 仅为兼容旧签名保留
+ * ——旧实现用它把每叶节点的扫描限制在 48 个点，新实现根本不做扫描。 */
 function threatSpaceBonus(color, cap = 48) {
-  let bonus = 0;
-  let checked = 0;
-  const seen = new Set();
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (++checked > cap) return bonus;
-          const lv = threatLevel(nr, nc, color);
-          if (lv >= 1) bonus += [0, 600, 2000, 15000, 80000][lv];
-        }
-      }
-    }
-  }
-  return bonus;
+  if (!evalReady) ensureEvalState();
+  return spaceSum[color];
 }
 
 /**
  * 局面评估：己方全部棋型分 − 对方全部棋型分×1.1，另加连接性、中心权重、
- * 双威胁组合分与“威胁空间”分（见 threatSpaceBonus）。
+ * 双威胁组合分与“威胁空间”分。
+ * 强度改造（P0）：全部改为读增量表（O(1)），替代旧实现每个叶节点的
+ * “全盘 361×4 次 lineInfo + 128 次 countThreats + 双方各 48 次 threatLevel”。
+ * 数值口径与旧实现一致：
+ *   lineSum  各色连线棋型分之和（按连续段起点计一次）
+ *   adjSum   四邻同色连接数之和        posSum  中心权重之和
+ *   dblCnt   一手双威胁点数            spaceSum 威胁空间加权和
  * @param {number} [comboWeight] 双威胁/威胁空间分的折扣系数：AI 决策用 1；
- *        胜率估算用 0.25，避免“双三/活三延伸”这类强而不必胜的棋型把胜率推过高。 */
+ *        胜率估算用 0.25，避免“双三/活三延伸”这类强而不必胜的棋型把胜率推过高。
+ */
 function evaluateBoard(me = aiColor, opp = playerColor, comboWeight = 1, tempoFor = null) {
-  let aiScore = 0;
-  let playerScore = 0;
-  let aiAdj = 0;
-  let playerAdj = 0;
-  const center = (boardSize - 1) / 2;
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      const color = board[r][c];
-      if (color === EMPTY) continue;
-      for (const [dr, dc] of DIRECTIONS) {
-        // 只统计这条连线的起点（r-dr, c-dc 不是同色子），一行只计一次
-        const pr = r - dr, pc = c - dc;
-        if (inBoard(pr, pc) && board[pr][pc] === color) continue;
-        const info = lineInfo(r, c, dr, dc, color);
-        const s = lineScore(info.count, info.open, info.reachable);
-        if (color === me) aiScore += s;
-        else playerScore += s;
-      }
-      // 连接性：与同色相邻的子数（鼓励进攻抱团，避免单子乱飞）
-      let adj = 0;
-      for (const [dr, dc] of DIRECTIONS) {
-        const nr = r + dr, nc = c + dc;
-        if (inBoard(nr, nc) && board[nr][nc] === color) adj++;
-      }
-      // 中心位置权重：越靠近天元，向四周展开的空间越大（大局观）
-      const dist = Math.abs(r - center) + Math.abs(c - center);
-      const posW = boardSize - dist;
-      if (color === me) { aiAdj += adj; aiScore += posW * CENTER_WEIGHT; }
-      else { playerAdj += adj; playerScore += posW * CENTER_WEIGHT; }
-    }
-  }
-  // comboWeight：默认 1（AI 决策用，双三=强杀招）；胜率估算时传入折扣系数，
-  // 让“双三候选”这类强而不必胜的棋型不至于把胜率推到 98% 的封顶值。
-  aiScore += comboBonus(me) * comboWeight;
-  playerScore += comboBonus(opp) * comboWeight;
-  // 威胁空间：双方各有多少个“一手成活三以上”的选点（进攻灵活度/对方反击空间）。
-  // 双威胁杀招由 comboBonus 单独计，这里只补单线威胁，避免重复；对方威胁空间
-  // 同样×1.1，让 AI 进攻时始终把对手的反击空间考虑进去（全局大局观）。
-  const aiSpace = threatSpaceBonus(me) * comboWeight;
-  const playerSpace = threatSpaceBonus(opp) * comboWeight;
-  const raw = (aiScore + aiAdj * CONNECT_BONUS + aiSpace)
-            - (playerScore + playerAdj * CONNECT_BONUS + playerSpace) * 1.1;
-  // 先手权（tempo）修正：轮到谁走，谁有先行展开权。双方各有一个活三时
-  // 静态棋型分完全一样，但先手方下一手就能把活三变活四锁定胜局——
-  // 不修正会让浅层搜索严重误判这类“先手决定胜负”的局面。
+  if (!evalReady) ensureEvalState();
+  const aiScore = lineSum[me] + adjSum[me] * CONNECT_BONUS + posSum[me] * CENTER_WEIGHT
+                + (dblCnt[me] * DOUBLE_THREAT_BONUS + spaceSum[me]) * comboWeight;
+  const playerScore = lineSum[opp] + adjSum[opp] * CONNECT_BONUS + posSum[opp] * CENTER_WEIGHT
+                + (dblCnt[opp] * DOUBLE_THREAT_BONUS + spaceSum[opp]) * comboWeight;
+  // 防守权重略高（1.1）：让 AI 攻防取舍时稍微偏保守（与旧实现一致）。
+  // 先手权（tempo）修正：轮到谁走谁有先行展开权，同一局面下先手方评估更高。
+  const raw = aiScore - playerScore * 1.1;
   if (tempoFor === me) return raw + TEMPO_BONUS;
   if (tempoFor === opp) return raw - TEMPO_BONUS;
   return raw;
@@ -1157,31 +1478,23 @@ function evaluateBoard(me = aiColor, opp = playerColor, comboWeight = 1, tempoFo
  * 对方一步只能堵一处，是极难防守的杀棋。只扫描“己方棋子相邻”的空位，
  * 并设数量上限，控制评估开销（否则 minimax 叶节点会明显变慢）。 */
 function comboBonus(color) {
-  let bonus = 0, checked = 0;
-  const seen = new Set();
-  for (let r = 0; r < boardSize; r++) {
-    for (let c = 0; c < boardSize; c++) {
-      if (board[r][c] !== color) continue;
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = r + dr, nc = c + dc;
-          if (!inBoard(nr, nc) || board[nr][nc] !== EMPTY) continue;
-          const key = nr * boardSize + nc;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (++checked > 128) return bonus;
-          if (countThreats(nr, nc, color) >= 2) bonus += DOUBLE_THREAT_BONUS;
-        }
-      }
-    }
-  }
-  return bonus;
+  // 强度改造：dblCnt 由增量表维护（"一手形成两个活三以上威胁"的空位数），
+  // 旧实现每个叶节点要扫 128 个邻域点、每点 4 次 lineInfo。
+  if (!evalReady) ensureEvalState();
+  return dblCnt[color] * DOUBLE_THREAT_BONUS;
 }
 
 /**
  * 统计在 (r, c) 放 color 后，四个方向中“有效威胁”（活三及以上：
  * 活三/冲四/活四/五连）的数量。威胁数 >= 2 意味着对方一手无法同时处理。 */
 function countThreats(r, c, color) {
+  // 强度改造：空位读增量表（O(1)），旧实现每个节点要跑 4 次 lineInfo
+  if (evalReady && board[r][c] === EMPTY) return cgThr[color - 1][r * boardSize + c];
+  return countThreatsRef(r, c, color);
+}
+
+/** 有效威胁方向数的参考实现（增量表未就绪或点上有子时使用） */
+function countThreatsRef(r, c, color) {
   let n = 0;
   for (const [dr, dc] of DIRECTIONS) {
     const info = lineInfo(r, c, dr, dc, color);
