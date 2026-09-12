@@ -204,7 +204,7 @@ if (declared.length !== fnNames.length) problems.push(`函数数量不符: ${dec
 
 const TEMPLATE_API = new Set(['setBoardSize', 'resizeBoard', 'setColors', 'setMoveVariety', 'resetState']);
 const MODULE_DATA = new Set(['board', 'boardSize', 'playerColor', 'aiColor', 'moveVariety', 'lastVcfPath', 'lastVctPath']);
-const NESTED_LOCAL = new Set(['counterScore', 'tieScore', 'consider']);
+const NESTED_LOCAL = new Set(['counterScore', 'tieScore', 'consider', 'push', 'addPt', 'pushBits']);
 const BUILTIN = new Set(['Array', 'Math', 'JSON', 'Object', 'Number', 'String', 'Set', 'Map', 'Int32Array',
   'Infinity', 'parseInt', 'parseFloat', 'isNaN', 'if', 'for', 'while', 'switch', 'catch', 'return',
   'function', 'typeof', 'new', 'do', 'else', 'factory']);
