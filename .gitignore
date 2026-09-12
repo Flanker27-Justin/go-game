@@ -5,7 +5,7 @@ work/_qrdept/
 # ===== 运行/临时产物 =====
 *.log
 
-# ===== 历史遗留的一次性修复产物（曾被误当备份留在根目录）=====
+# ===== 历史遗留的一次性修复产物（已归档到 work/archive/，此处只防将来重新冒出来）=====
 _fixed.html
 _damaged.txt
 _damaged2.txt
@@ -17,3 +17,7 @@ _match-report.txt
 *.damaged-backup
 *.bak-tt
 *.bak-online
+
+# work/archive/ 里的归档件是刻意入库的，不受上面的规则影响
+!work/archive/
+!work/archive/**

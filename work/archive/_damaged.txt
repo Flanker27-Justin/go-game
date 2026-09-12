@@ -1,0 +1,450 @@
+5	<title>五子�?/title>
+19	  /* ===== 状态栏与工具按�?===== */
+33	  button.active {               /* 当前选中的模式按�?*/
+39	  /* ===== 设置区：棋盘格数 / AI 难度 / 教学开�?===== */
+57	  /* 双人模式�?AI 相关控件禁用置灰 */
+64	  /* ===== 教学点评面板：显�?AI 对玩家落子的评价�?AI 的思路 ===== */
+116	  /* ===== 邀请链接行（建房后显示�?===== */
+123	  /* ===== 猜先弹窗：抛硬币 / 猜奇�?===== */
+158	  /* ===== 胜率面板：人机对战胜率条可视�?===== */
+174	    background: #c2543e;                 /* 底色=AI 红，右侧剩余部分�?AI 份额 */
+204	  <h1>五子�?/h1>
+211	    <button id="btnRestart">重新开�?/button>
+226	        <option value="easy">简�?/option>
+232	    <label id="hintLabel"><input type="checkbox" id="showHintToggle" checked> 推荐�?/label>
+238	      <label>服务�?<input id="wsAddrInput" placeholder="留空=当前页面地址" size="28"></label>
+239	      <label>房间�?<input id="roomCodeInput" maxlength="5" size="7" placeholder="�?AB12C"></label>
+245	      <label>邀请链�?<input id="inviteLinkInput" readonly size="34"></label>
+250	    <div id="onlineHint">电脑端建房后点【复制链接】发给对方：对方在手�?电脑浏览器打开链接会自动进入房间开始对局（微信、QQ 均可转发；异地朋友请�?cpolar 公网地址访问）�?/div>
+253	    <div class="comment-row"><span class="tag">💬 点评</span><span id="playerComment">教学点评开启后，AI 会点评你的每一步�?/span></div>
+257	    <div class="comment-row"><span class="tag">📊 胜率</span><span id="winRateText">�?/span></div>
+262	      <h3>🎲 猜先 · 决定谁执�?/h3>
+265	        <button id="guessTabCoin" class="active">🎲 抛硬�?/button>
+266	        <button id="guessTabStones">�?猜奇�?/button>
+269	        <button id="btnFlipCoin">掷硬�?/button>
+273	        <p>系统已悄悄抓了一把棋子（1~5 颗），猜猜是奇数还是偶数�?/p>
+297	 * 零、扩展接口：游戏注册表（GameAdapter�? * ------------------------------------------------------------
+298	 * 设计目标：把本页做成“框�?+ 游戏”的架构——五子棋是第一个（也是
+299	 * 目前唯一完整的）游戏，后续的国际象棋、围棋、中国象棋通过同一�? * 接口接入。所有游戏统一注册�?GAME_REGISTRY，界面“游戏”下拉框�? * 自动列出已注册的游戏，无需改动框架代码�? *
+300	 * 每个游戏实现一个“适配器对象”（GameAdapter），核心约定如下�? *   id / name            必填。唯一标识与界面显示名
+301	 *   modes                支持的模式数组，�?['pvp', 'pve']
+302	 *   boardSizes           可选格数数组；null 表示固定棋盘（如国际象棋 8×8�? *   defaultBoardSize     默认格数（有 boardSizes 时建议给出）
+303	 *   aiLevels             AI 难度表，�?{ easy:'简�?, medium:'中等' }；null 表示暂无 AI
+306	 *   onEnter()            切到本游戏时调用：负责初始化与首帧绘�? *   onExit()             切走时调用：负责清理定时器、临时监听器�? *   onCanvasClick(e)     画布点击事件（e 为原生事件对象）
+307	 *   onUndo()/onRestart() 悔棋 / 重新开始（未实现可省略，框架会忽略�? *   onModeChange(mode)   双人 / 人机切换
+310	 *   onEduToggle(ok)      教学点评开关（可选能力，未实现时忽略点击�? *   onHintToggle(ok)     推荐点开关（可选能力）
+313	 *   1) 复制 games/_adapter-template.js �?games/你的游戏.js�? *   2) 按文件里�?TODO 逐项实现适配器；
+314	 *   3) 在页面末尾用 <script src="games/你的游戏.js"> 标签引入本文件即�? *      （注意：注释里不要出�?script 的结束标签字样，否则会被 HTML
+315	 *      解析器当作脚本块终点，导致后续代码全部失效）�? * 注册后框架自动把它加入“游戏”下拉框，并按其能力显隐设置项�? * ============================================================ */
+317	/** 游戏注册表：id �?适配器对象。所有游戏都登记在这�?*/
+320	/** 当前激活的游戏 id（默�?'gomoku'�?*/
+329	/** 获取当前激活的游戏适配�?*/
+347	/** 切换到指定游戏：先让旧游戏收尾，再让新游戏接�?*/
+355	  syncSettingsVisibility(target);      // 按新游戏能力显隐/重建设置�?  if (target.onEnter) target.onEnter();
+360	 * - 棋盘格数：只有声明了 boardSizes 的游戏才显示�? * - AI 难度：人机模式且声明�?aiLevels 才显示，选项由游戏提供；
+361	 * - 教学点评 / 推荐点：人机模式�?supportsEdu 才显示�? */
+394	  // 胜率显示：仅对支持教学点评（即完整实现）的人机游戏开�?  winRateLabel.style.display = (hasPve && g.supportsEdu) ? '' : 'none';
+397	/** 框架级控件总开关：切到“开发中”的游戏时整体禁用，只留游戏下拉�?*/
+408	 * 说明：所有可调参数集中在此，改棋盘格数、AI 强度等无需翻找逻辑代码�? * ============================================================ */
+409	const BOARD_SIZES = [13, 15, 19]; // 可选棋盘格�?const DEFAULT_BOARD_SIZE = 19;    // 默认棋盘格数
+410	const CELL_SIZE = 40;             // 每个格子的像素尺�?const MARGIN = 20;                // 棋盘线到画布边缘的边�?
+416	const MODE_PVE = 'pve';           // 人机对战（默认玩家执黑、AI 执白，猜先可互换�?const MODE_ONLINE = 'online';     // 在线对战（WebSocket 双人实时对弈�?const AI_COLOR = WHITE;           // AI 默认执白（猜先后�?aiColor 变量决定实际执子�?const AI_DELAY = 250;             // AI 落子前的延迟（毫秒），模拟思�?
+418	const LEVEL_EASY = 'easy';        // 简单：单步启发式打�?const LEVEL_MEDIUM = 'medium';    // 中等：组合棋型评�?+ 必杀/挡杀
+422	const SEARCH_DEPTH = 3;           // 博弈树搜索深度（根节点之外的层数�?const CANDIDATE_LIMIT = 16;       // 每层候选点上限，控制分支因�?const ROOT_CANDIDATE_LIMIT = 18;  // 根节点候选点上限
+423	const SEARCH_BUDGET_MS = 4000;    // 单次搜索时间预算（“更强但更慢”取舍：配合置换�?历史启发，最长约 4s�?const MEDIUM_SEARCH_DEPTH = 3;     // 中等档浅搜索深度：在威胁分层之上叠加 3 �?Alpha-Beta，兼顾强度与响应
+424	const MEDIUM_SEARCH_BUDGET_MS = 600; // 中等档浅搜索时间预算（毫秒）：预算内跑完深度 3，超时退回单步打�?const HINT_RADIUS = 2;            // 候选点收集半径：只考虑已有棋子周围 2 �?const WIN_SCORE = 100000000;      // 搜索中的“必胜”分值，远大于一切棋型分
+429	const TT_EXACT = 0;               // 精确值：该节点搜索完整，值可�?const TT_LOWER = 1;               // 下界：�?>= beta 时可直接剪枝返回
+430	const TT_UPPER = 2;               // 上界：�?<= alpha 时可直接剪枝返回
+433	const TT_PERSP_BLACK = 0x6D2B79F5;  // 哈希常量：区分“搜索视�?黑方”（评估分以黑为正）
+434	const TT_PERSP_WHITE = 0x1B56C4E9;  // 哈希常量：区分“搜索视�?白方”（评估分以白为正）
+436	/* VCF（连续冲四杀棋）参数（中�?困难档使用） */
+437	const VCF_MAX_PLIES = 10;         // VCF 最大搜索层数（每层 = 己方一�?+ 对方一手）
+438	const VCF_NODE_LIMIT = 5000;      // VCF 节点上限，防止复杂局面卡�?const VCF_TIME_BUDGET_MS = 250;   // VCF 单次搜索时间预算（毫秒）/* VCT（连续活三杀棋）参数（中�?困难档使用） */
+439	const VCT_MAX_PLIES = 10;         // VCT 最大搜索层数（每层 = 己方一�?+ 对方一手）
+440	const VCT_NODE_LIMIT = 5000;      // VCT 节点上限，防止复杂局面卡�?const VCT_TIME_BUDGET_MS = 300;   // VCT 单次搜索时间预算（毫秒）
+443	const OPENING_TOTAL_MOVES = 8;    // 白棋�?8 手（含黑棋在内共 8 子）内使用开局策略
+446	/* 开局库：�?work/gen-opening-book.js 用引擎自身搜索为 0~8 子局面生成（860 个规范化局面�?590 条应答）�? * 覆盖�?9 手。key = 轮到�?B/W) + '|' + 8 对称规范化后的棋子相对坐标串；应答为 [相对�? 相对�? 权重 5~1]�? * 相对坐标以天元为中心，实际落�?= 天元 + 相对坐标。查表放在战术层之后：有即时威胁先按战术走，
+447	 * 安静局面再按定式应手，深开局阶段也不会漏防�?*/
+452	/* 局面评估权�?*/
+453	const CONNECT_BONUS = 30;         // 同色相邻子连接性加分（鼓励抱团连攻�?const CENTER_WEIGHT = 25;         // 中心位置权重（大局观：中心更能向四周展开�?const DOUBLE_THREAT_BONUS = 30000; // 双威胁（双三/双四候选）组合加分
+454	const TEMPO_BONUS = 1500;          // 先手权（tempo）加分：轮到的一方有先行展开权�?                                   // 用于搜索评估：双方各有一个活三时，先手方把活�?                                   // 变活四即可锁定胜局，静态评估若只看棋型会误判成均势�?const WIN_RATE_SCALE = 40000;      // 胜率映射标尺：evaluateBoard 分数除以它后�?tanh（分越大胜率越高�?                                   // 取值偏大让“活�?双三”等强而不必胜的棋型只显示 60~80%�?                                   // 避免普通优势被 tanh 放大�?90%+ 的“假胜率”�?const WIN_RATE_COMBO_WEIGHT = 0.25; // 胜率估算时双威胁组合分的折扣系数�?                                   // AI 选点时双�?必争的杀招（满分计入），但胜率上双三
+455	                                   // 并非强制胜（对方还有办法周旋），�?2.5 折避免直接飙�?98%�?
+456	/* 四个判胜方向：[行增�? 列增量]，即横、竖、主斜、副�?*/
+460	 * 二、全局状�? * 说明：所有可变状态集中声明，棋盘二维数组是唯一数据源，绘制只读它�? * ============================================================ */
+461	let boardSize = DEFAULT_BOARD_SIZE;      // 当前棋盘格数�?3/15/19�?let aiLevel = LEVEL_MEDIUM;              // 当前 AI 难度
+463	let showHint = true;                     // 是否显示推荐点标�?let guessFirst = true;                   // 开局猜先开关（双人/人机模式生效，在线模式固定黑白）
+465	let aiColor = WHITE;                     // 人机模式：AI 执子颜色（与 playerColor 相反，默认白�?let p1Color = BLACK;                     // 双人模式：玩�?（先手方）执子颜�?let guessState = null;                   // 猜先弹窗状�?{ winner:'guesser'|'other', winnerBlack }
+466	let moveVariety = 1;                     // 出棋随机�?0~1�?=完全确定（测试用），1=正常随机，让 AI 出棋变幻莫测
+468	let lastOppIntent = null;                // 最近一次对手落子的意图分析（AI 决策与教学点评用�?
+470	let currentPlayer;    // 当前行动方（BLACK / WHITE�?let gameOver;         // 对局是否结束
+471	let gameMode;         // 当前模式（MODE_PVP / MODE_PVE�?let moveCount;        // 已落子数，用于显示步数与判平局
+472	let lastMove;         // 最后一�?[r, c]，用于画标记
+473	let winLine;          // 获胜五子坐标数组，用于高亮；null 表示�?let moveHistory;      // 落子历史栈，每项 [r, c]，用于悔�?let aiTimer;          // AI 落子的定时器句柄，用于取�?防重�?let hintMove;         // 教育模式下的推荐落点 [r, c]；null 表示不显�?let searchState;      // 搜索计时�?{ t0, budget }，供 minimax 超时截断�?let lastVcfPath = null;     // 最近一�?VCF 检测找到的杀棋路径（教学点评用）
+474	let teachBlinkTimer = null; // 教学模式“危险点闪烁”的定时器句�?let ttMap = null;           // 置换表：Map<hash, {depth, flag, val}>，困难档搜索缓存
+475	let ttZobrist = null;       // Zobrist 随机表：19×19×[�?白]，棋盘哈希的随机底数
+476	let boardHash = 0;          // 当前棋盘的增�?Zobrist 哈希（落�?悔棋时维护）
+477	let historyTable = null;    // 历史启发表：Int32Array(2×361)，按落子颜色记录“剪枝好手�?let killerTable = null;      // 杀手表：按剩余深度记录 2 个“曾引发剪枝”的落点（killer move�?
+478	/* 在线对战状态（�?MODE_ONLINE 模式使用�?*/
+479	let ws = null;            // WebSocket 连接对象；未连接�?null
+483	let onlineReady = false;  // 双方是否已就位、可以落�?
+486	 * 说明：页面元素只在这里取一次，后续全部通过变量引用�? * ============================================================ */
+543	 * 四、工具函�? * 说明：与具体规则无关的小工具，坐标换算、越界判断等�? * ============================================================ */
+549	/** 列号 c 对应的画�?x 坐标（列�?0 在左�?*/
+552	/** 行号 r 对应的画�?y 坐标（行�?0 在上�?*/
+555	/** 列号转字母：0→A�?→B…�?9 路棋盘用�?A~S */
+558	/** 坐标转人类可读位置，�?(6,6) �?"G7"（字母为列、数字为行） */
+561	/** 颜色转中文名，用于状态栏与教学点评文�?*/
+565	 * 双人模式：某执子颜色对应的玩家标签�? * 猜先决定玩家1执黑还是执白，状态栏据此显示“黑棋（玩家1�?白棋（玩�?）”�? */
+568	  return color === p1Color ? '（玩�?�? : '（玩�?�?;
+572	 * 五、游戏控�? * 说明：落�?�?判胜�?�?换手 →（人机模式下调�?AI）的主流程都在这里�? * ============================================================ */
+574	 * 初始�?重开一局。mode 缺省时默认双人对战�? * askGuess=true 表示这次开局需要弹“猜先”弹窗（模式切换 / 重新开始触发）�? * 格数切换只重建棋盘、保留当前执子约定，不弹窗�? */
+577	  clearTimeout(aiTimer);            // 取消可能存在�?AI 落子定时�?  if (mode === MODE_ONLINE) {
+593	  lastVcfPath = null;               // 新一局清掉上次 VCF 杀棋路�?  clearInterval(teachBlinkTimer);   // 停掉教学危险点闪�?  teachBlinkTimer = null;
+598	  lastOppIntent = null;             // 清掉上一局的对手意图分�?  closeGuessDialog();               // 收起可能存在的猜先弹�?  resizeCanvas();                   // 画布尺寸随棋盘格数变�?  syncModeButtons();                // 高亮当前模式按钮
+599	  syncControls();                   // 双人模式下禁�?AI 相关控件
+603	  // 双人/人机模式且开启“开局猜先”时，弹窗决定谁执黑谁执白（此时先不启动 AI�?  if (askGuess && guessFirst && (gameMode === MODE_PVP || gameMode === MODE_PVE)) {
+607	  // 玩家执白�?AI 执黑先行：开局直接调度 AI 首步
+612	 * 若当前轮�?AI（人机模式开局 AI 执黑时），安�?AI 首步落子�? * 猜先结果应用后、以�?init 结束时调用，保证执子颜色变化�?AI 能正常先行�? */
+620	/** 按当前棋盘格数重设画布宽高（19 路最大，�?760px�?*/
+628	 * �?(r, c) 落一颗当前玩家的棋子，并处理后续�? * 1) 写入数据 �?2) 判胜�?平局 �?3) 教学点评 �?4) 换手（人机模式自动触�?AI）�? * byPlayer 用于区分是玩家落子还�?AI 落子，决定是否触发点评逻辑�? */
+647	  if (moveCount === boardSize * boardSize) {  // 棋盘下满 �?平局
+654	    hintMove = null;                // 玩家落子后清掉旧推荐点，�?AI 应手后再�?    showPlayerComment(analyzePlayerMove(r, c));
+661	 * 交换行动方；轮到 AI 时安排定时落子，轮回玩家时刷新推荐点�? * 推荐点只在“AI 已经应手、轮到玩家”时计算，保证提示针对最新局面�? */
+673	 * 悔棋：撤销最近一步�? * - 双人模式：只撤销 1 步；
+674	 * - 人机模式：撤销玩家 1 �?+ AI 的应手（�?2 步），回到玩家的回合�? * - AI 思考中不允许悔棋；
+675	 * - 教育模式下同时清空点评与推荐点，避免与当前局面不符�? */
+681	  if (gameOver) {                   // 终局后悔棋：解除终局状�?    gameOver = false;
+691	    if (moveHistory.length > 0) {   // 再撤�?AI 的应�?      const [r2, c2] = moveHistory.pop();
+715	/** 根据当前状态刷新状态栏文字（回�?/ 步数 / 胜负 / 平局�?*/
+721	        // 在线模式：当前行动方（未换手）就是赢家，补充“你赢了/你输了�?        const winnerName = colorName(currentPlayer);
+722	        statusEl.textContent = winnerName + '获胜�? + (currentPlayer === myColor ? '（你赢了�? : '（你输了�?);
+724	        statusEl.textContent = currentPlayer === playerColor ? '你获胜了�? : 'AI 获胜�?;
+726	        statusEl.textContent = colorName(currentPlayer) + pvpOwner(currentPlayer) + '获胜�?;
+734	    statusEl.textContent = 'AI�? + colorName(aiColor) + '）思考中�?;
+738	    if (!onlineReady) {           // 未就绪（未加入房�?/ 对方未到）：复用面板状态文�?      statusEl.textContent = onlineStatusEl.textContent || '在线对战中�?;
+743	      ? '你的回合�? + name + '）�?�?' + moveCount + ' �?
+744	      : '等待对方�? + name + '）落子�?;
+748	  // 双人模式显示“玩�?/玩家2”，人机模式显示“（你）”——执子颜色由猜先决定
+749	  const owner = gameMode === MODE_PVE ? '（你�? : pvpOwner(currentPlayer);
+750	  statusEl.textContent = name + owner + '回合 · �?' + moveCount + ' �?;
+753	/** 高亮当前选中的模式按�?*/
+762	 * AI 难度与教学相关控件只在人机模式下可用；切回双人时强制关闭教学并清空面板�? */
+771	  boardSizeSelect.disabled = online;    // 在线对局固定 19 路，防止双方不一�?  btnUndo.disabled = online;            // 在线对局不允许单方悔�?  btnRestart.disabled = online;         // 在线对局不允许单方重开
+782	 * 九·五、在线对战（WebSocket 房间�? * 说明：通过 WebSocket 与服务器通信，实现“电脑开房、手机进房”的
+783	 * 双人实时对弈。协议为 JSON 消息，服务器�?outputs/gomoku-server.js�? * ------------------------------------------------------------
+785	 *   客户�?�?服务器：create / join{room} / move{r,c} / reset
+786	 *   服务�?�?客户端：room_created / room_joined / peer_joined /
+789	 * 客户端也做同样的提前拦截，避免无效点击与网络往返�? * ============================================================ */
+791	/** 建立 WebSocket 连接；action �?'create' �?'join'，code 为房间号 */
+799	    // 留空时自动使用“当前页面地址”，�?http://192.168.1.5:8123/ �?ws://192.168.1.5:8123/ws
+805	  onlineStatusEl.textContent = '正在连接服务器�?;
+809	    onlineStatusEl.textContent = '连接失败�? + err.message;
+813	    onlineStatusEl.textContent = action === 'create' ? '正在创建房间�? : '正在加入房间 ' + code + '�?;
+819	    try { msg = JSON.parse(evt.data); } catch (err) { return; }  // 忽略�?JSON 消息
+833	  ws.onerror = () => { /* 出错后浏览器会自动触�?onclose，统一在那里收�?*/ };
+836	/** 发�?JSON 消息；未连接或连接中则静默忽�?*/
+841	/** 处理服务器下发的所有消息类�?*/
+848	      onlineStatusEl.textContent = '房间已创建：' + roomCode + '（你执黑先行），等待对方加入�?;
+849	      showInviteLink(buildInviteUrl(roomCode));   // 生成并显示一键邀请链�?      onlineUpdateControls();
+857	      onlineStatusEl.textContent = '已加入房�?' + roomCode + '（你执白�?;
+858	      inviteRow.style.display = 'none';   // 加入方不需要邀请链�?      onlineUpdateControls();
+862	      onlineReady = true;      // 房主视角：对方已就位，对局开�?      onlineStatusEl.textContent = '对方已加入，对局开始！';
+863	      inviteRow.style.display = 'none';   // 房间已满，隐藏邀请链�?      updateStatus();
+869	      init(MODE_ONLINE);       // 双方同步重开（保留在线连接与房间�?      break;
+876	      // 客户端本地已判胜并高亮，这里仅补充面板文�?      if (msg.winner) {
+878	        onlineStatusEl.textContent = '对局结束�? + (iWin ? '你赢了！' : '你输了�?);
+885	      onlineStatusEl.textContent = '错误�? + msg.message;
+888	      break;  // 未知类型忽略，向前兼�?  }
+913	/** 根据连接状态刷新在线面板按钮的可用�?*/
+923	/* ---------------- 邀请链�?---------------- */
+926	 * 拼接邀请链接：当前页面地址 + ?room=房间号�? * 关键点：直接复用浏览器地址栏的 host——局域网 IP、cpolar 公网地址都能
+927	 * 自动适配，对方点开链接�?WebSocket 也会连到同一个地址，无需手动配置�? */
+940	/** 显示邀请链接行，并把链接文本选中，方便直�?Ctrl+C 复制 */
+971	/** 分享邀请链接：支持 Web Share API 的浏览器弹出系统分享面板（可选微信），否则退回复�?*/
+976	    navigator.share({ title: '五子棋对局邀�?, text: '来和我下一盘五子棋�?, url }).catch(() => {});
+983	 * 九·六、猜先（决定谁执�?执白的小概率游戏�? * 说明：双�?人机模式开局前可选“抛硬币”或“猜奇偶”两种方式，
+984	 * 赢家可自选执黑（先手）或执白。默认玩�?/你执黑、玩�?/AI 执白�? * 人机模式支持玩家执白（AI 执黑），AI 相关函数全部�?aiColor 决策�? * ============================================================ */
+1000	  btnGuessOdd.disabled = false;      // 新一局重新开放“猜奇偶”机�?  btnGuessEven.disabled = false;
+1002	    ? '你和 AI 先猜一把，赢家决定谁执黑先行（黑棋有先手优势）�?
+1003	    : '玩家1 �?玩家2 先猜一把，赢家决定谁执黑先行（黑棋有先手优势）�?;
+1007	/** 关闭猜先弹窗（同时恢复控件，供下次开局使用�?*/
+1020	 * 抛硬币：随机正反面�? * 正面 = 猜先方（人机：你；双人：玩家1）赢，反�?= 对方（AI/玩家2）赢�? */
+1022	  if (guessState && guessState.locked) return;   // 结果已揭晓：只允许一次机�?  btnFlipCoin.disabled = true;          // 动画期间禁止重复点击
+1025	  const anim = setInterval(() => {      // 先快速闪几轮，增加“开奖”的仪式�?    coinResultEl.textContent = tick % 2 === 0 ? '🎲 正面�? : '🎲 反面�?;
+1029	      coinResultEl.textContent = heads ? '🎉 正面�? : '💨 反面�?;
+1036	 * 猜奇偶：系统随机�?1~5 颗棋子，玩家猜奇�?偶数，猜中者赢�? * @param {boolean} odd true=猜奇�?false=猜偶�? */
+1038	  if (guessState && guessState.locked) return;   // 结果已揭晓：只允许一次机�?  const n = 1 + Math.floor(Math.random() * 5);
+1041	  stoneResultEl.textContent = '�?' + n + ' �?· ' + (isOdd ? '奇数' : '偶数') + '�? + (correct ? ' 你猜中了�? : ' 猜错了�?);
+1046	 * 猜先揭晓：winner �?'guesser'（你/玩家1）或 'other'（AI/玩家2）�? * 赢家是人类时显示“执�?执白”选择按钮；赢家是 AI 时自动执黑（先手优势）�? */
+1048	  // 结果揭晓即锁定：禁用切换玩法与跳过按钮，防止“结果不满意再掷一次�?  guessState = { winner, winnerBlack: null, locked: true };
+1052	  btnFlipCoin.disabled = true;          // 掷硬�?猜奇偶都只有一次机�?  btnGuessOdd.disabled = true;
+1055	  const guesserName = gameMode === MODE_PVE ? '�? : '玩家1';
+1058	    // AI 赢得猜先：自动选黑先行，玩家执白（无需手动选择�?    guessState.winnerBlack = true;
+1059	    guessPickTextEl.textContent = 'AI 赢得了猜先，选择执黑先行。你将执白�?;
+1066	    guessPickTextEl.textContent = winName + ' 赢得了猜先！请选择执子�?;
+1076	 * 应用猜先结果�? * @param {boolean|null} pickBlack true=赢家执黑 false=赢家执白 null=使用 AI 自动选择的结�? * 人机模式�?playerColor/aiColor；双人模式写 p1Color（玩�? 取相反颜色）�? */
+1091	  // 玩家选执�?�?AI 执黑先行，先调度 AI 首步
+1097	  // 教育模式下按新的玩家颜色刷新推荐点与危险点高�?  if (eduMode && gameMode === MODE_PVE && currentPlayer === playerColor && !gameOver) {
+1105	 * 六、胜负判�? * 说明：只检查“刚落的子”是否成五——能成五的连线必然穿过它�? * ============================================================ */
+1107	 * 检查以 (r, c) 为最后一子是否形成五连�? * @returns {Array|null} 整条连线的坐标数组（供高亮绘制），没有则返回 null�? */
+1112	    // 以落子点为中心，沿当前方向向两端延伸，收集同色棋�?    const line = [[r, c]];
+1129	 * 七、绘制（数据 �?画面�? * 说明：每次全量重绘，只读 board 与少量状态，保证画面与数据永远一致�? * ============================================================ */
+1132	  drawStones();     // 所有棋�?  drawLastMove();   // 最后一步标记（小红点）
+1134	  drawTeaching();   // 教学模式：玩家棋型高�?+ AI 危险点闪�?  drawHint();       // 教育模式推荐点（半透明圆圈�?  updateTeachBlink(); // 按需启动/停止危险点闪烁动�?}
+1143	  // 网格：横、竖�?boardSize 条线
+1157	  // 星位：天�?+ 四角星。公式保�?13/15/19 路都能落在标准位�?  const center = (boardSize - 1) / 2;
+1169	/** 绘制全部棋子：黑子深色实心，白子浅色带描�?*/
+1196	/** 用红线连接获胜五子，结果一目了�?*/
+1224	/** 教学模式绘制层：高亮玩家最后一步的棋型线，并闪�?AI 下一步可成五的危险点 */
+1227	  // �?玩家最后一步形成的棋型方向：黄色半透明粗线（画在棋子之上，
+1228	  //    直观展示“这步形成了活三/冲四”等棋型走向�?  if (lastMove && board[lastMove[0]][lastMove[1]] === playerColor) {
+1249	  // �?AI 下一步可成五的危险点：红色圆圈，�?300ms 节奏闪烁，提醒玩家先防守
+1286	 * 说明�? * - 简单：纯单步启发式打分�? * - 中等：在打分基础上增加“一步必杀/挡杀”检测、VCF 连续冲四杀棋�? *         双杀（双�?双四）威胁识别、双�?双四组合加权、威胁分层决�? *         （含“防守反击”选点）、开局库（�?5 手查表）与规则式开局策略兜底�? * - 困难：再叠加 Alpha-Beta 剪枝搜索，搜索深度随残局进度自动加深�?�?�? 层）�? *         单步思考预算最长约 4s，中后盘与残局能看穿更长的杀棋链条�? * 统一入口 getBestMove(level, forColor)：AI 落子�?aiColor 视角�? * 教学推荐�?点评�?playerColor（玩家）视角，保证建议真正利于玩家�? * 猜先功能可让玩家执白、AI 执黑，因此所�?AI 决策一律以 aiColor 为准�? * ============================================================ */
+1289	 * VCF（Victory by Continuous Fours，连续冲四）杀棋检测�? * 思路：连续下“冲四”，对方每一步都只能被迫挡这个冲四，
+1290	 * 一路把对方带到“活�?五连”为止——这就是一条强制胜序列�? * 命中时返回当前这一步（首个强制落点），并把完整路径存入 lastVcfPath 供教学展示�? * @param {number} color 进攻方颜�? * @param {number} maxPlies 最大搜索层数（每层 = 己方一�?+ 对方一手）
+1296	  // 对方已可一步成�?�?VCF 前提不成立（必须先防守）�?  // 我方已可一步成�?�?交给 findImmediateWin 处理即可�?  if (findImmediateWin(opp) || findImmediateWin(color)) return null;
+1297	  // 记录“最短连杀路径”：同一局面往往存在多条 VCF 路线，优先走手数最短的�?  // 因为对方被迫应的手数越少，越没有机会中途反杀，杀棋越稳�?  const vcf = { nodes: 0, t0: performance.now(), budget: VCF_TIME_BUDGET_MS, cur: [], bestLen: Infinity, bestPath: null };
+1306	 * VCF 递归主体�? * @param {number|null} lastR 上一手落点行（用于快速判五，null 表示根节点）
+1308	 * @returns {number} 从该节点取胜所需最少“己方手数”（>0 表示必胜�?1 表示无解/超限�? */
+1310	  if (++vcf.nodes > VCF_NODE_LIMIT) return -1;               // 节点上限防卡�?  if (performance.now() - vcf.t0 > vcf.budget) return -1;    // 时间上限防卡�?  if (lastR !== null && canWinNow(lastR, lastC, color)) {
+1311	    if (vcf.cur.length < vcf.bestLen) {                      // vcf.cur 即“根到当前手”完整路�?      vcf.bestLen = vcf.cur.length;
+1328	      len = 1;                              // 直接成五或形成活四：对方无法一手化�?      if (vcf.cur.length < vcf.bestLen) {
+1335	        len = 1;                            // 双四：对方只能堵一处，另一处照样成�?        if (vcf.cur.length < vcf.bestLen) {
+1344	        if (sub > 0) len = sub + 1;         // 对方堵住后我们仍能连杀，总手�?+1
+1349	    // 只保留手数最短的分支：杀棋越短越稳（vcfForcingMoves 已按威胁等级排序�?    if (len > 0 && len < bestLen) { bestLen = len; bestMove = [r, c]; }
+1351	  // 根节点处把最短路径起点记录下来，�?findVcfWin 返回
+1359	/** 收集“落子后能形成冲�?活四/五连”的候选点，按威胁等级与启发式分降�?*/
+1383	/** 我方�?(r, c) 落子形成冲四后，对方必须堵住的开放端点（冲四只有一个端点） */
+1407	 * 双杀检测：一手落子后形成“不可防”的双重威胁（双�?/ 活四+任意），
+1408	 * 对方一步只能处理其中一处，另一处下一手必然成五�? * @returns {Array|null} [r, c]
+1418	      let forcing = 0;                        // 冲四/活四方向�?      for (const [dr, dc] of DIRECTIONS) {
+1428	      if (maxLv < 3 && forcing < 2) continue; // 只有活四�?）或双冲四（2+2）才算不可防
+1437	 * 双三/双威胁“阵法杀招”检测：一手落子后形成两个“活三以上”威�? * （双�?/ 活三+冲四 / 双四），对方一步只能堵一处，是五子棋最典型�? * 必胜阵型——中盘把握住它就能把优势直接兑现成杀棋�? * 前提：对方没有更快威胁（不能一步成五、也不能一手成活四），
+1438	 * 否则必须先防守，双杀只是空谈�? * @param {number} color 行动方颜�? * @returns {Array|null} 杀招落�?[r, c]；不存在则返�?null
+1442	  if (findImmediateWin(opp)) return null;   // 对方能一步成�?�?必须先挡
+1447	      // 比我方双三（约三子内成五）更快，必须放弃进攻先防�?      if (threatLevel(r, c, opp) >= 3) return null;
+1461	 * 找出“对方下一步落子即可一手形�?�? 个活三以上威胁（双三/三四/双四）”的空位�? * 这类点一旦让给对方，对方就拥有不可防的强制胜，因此我方必须抢先占住�? * 选点优先“挡住后自己还能顺势反击”的位置（用己方视角�?scoreFor 决胜）�? * @param {number} color 对方颜色
+1462	 * @returns {Array|null} 需要堵住的�?[r, c]；不存在则返�?null
+1471	      // countThreats 会“假装”在该点落子统计威胁数（lineInfo 不写棋盘�?      if (countThreats(r, c, color) >= 2) {
+1481	 * 开局策略（AI 前若干手）：把落点限制在中心 9×9 区域�? * 优先选“与已有己方子构成两个方向发展”的点；对方占天元时呼应天元旁星位�? * 从得分最高的前几名里带权随机选一手，�?AI 面对同一种开局时出棋不重样�? * @param {string} [level] 当前难度，决定随机候选数（简单变化大、困难收敛）
+1485	  // 用棋盘上的棋子数判断是否仍在开局阶段（不依赖外部状态，便于测试�?  let placed = 0;
+1500	      // 双方向发展：落子后能在两个不同方向延伸已有己方子 �?开局更灵�?      let dirs = 0;
+1515	  candidates.sort((a, b) => b.s - a.s);             // 分数降序，供 pickVaried 取头�?  return pickVaried(candidates, pickTopN(level, 'opening'));
+1518	 * 开局库查询：把当前局面做 8 对称规范化后查表，命中则返回库内应答�? * 开局库由 work/gen-opening-book.js 用引擎自身深�?2 搜索生成，覆�? * 盘面 0~5 子（�?5 手）。命中时 AI 开局有章法、响应快，且同一开局�? * 按权重随机换着下（配合 moveVariety�?=恒取最强，>0 按权�?5~1 随机�? * hard 只在�?2 名里浮动、medium �?3 名，兼顾强度与“变幻莫测”）�? * @param {string} level 难度档位，决定随机候选范�? * @param {number} side 行动方颜色（BLACK/WHITE），决定查表 key 的前缀
+1532	  // 8 对称变换表（与生成器一致）：相对天元坐�?(x,y)=(r-center, c-center)�?  // INV 为逆变换，把库内“规范朝向”的相对坐标还原到当前棋盘的实际朝向
+1540	  // 规范化：�?8 个朝向里“字典序最小的棋子坐标串”作�?key�?  // 同一开局无论旋转/镜像都命中同一�?key（生成器与这里完全一致）
+1560	  // 按难度限制随机候选数并带权选取（权�?5~1 = 生成器的搜索分排序）
+1573	  // 逆对称还原绝对坐标；13/15 小棋盘越界或目标已被占时返回 null，交由上层兜�?  const [x, y] = SYM[INV[bestSym]](entries[idx][0], entries[idx][1]);
+1582	 * 获取当前难度下的最佳落点�? * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD�? * @param {number} [forColor] 计算视角的颜色；缺省�?aiColor（AI 实战决策）�? *        教学推荐点时�?playerColor，用“玩家视角”计算，保证建议真正利于玩家�? * @returns {Array|null} [r, c]
+1589	    // 简单档保持“入门”定位：不做复杂威胁分层，但最基本的“能赢就赢�?    // 对方要赢了必须挡”不能漏，否�?AI 会犯低级失误、体验很差�?    const easyWin = findImmediateWin(me);
+1596	  // 中等/困难档：完整威胁分层（一步成�?�?VCF �?双杀 �?活四/活三攻防 �?开局�?�?启发式开局 �?搜索�?  {
+1597	    const aiWin = findImmediateWin(me);            // 自己能一步成�?�?直接�?    if (aiWin) return aiWin;
+1598	    const playerWin = findImmediateWin(opp);       // 对方能一步成�?�?必须�?    if (playerWin) return playerWin;
+1606	    // 双杀：一手形成双�?活四等不可防威胁
+1612	    // 双三/三四/双四“阵法杀招”：一手形成双威胁且对方无更快威胁 �?主动建立必胜阵型
+1615	    // 对方双杀意图防守：对方下一步一手可成双�?三四/双四 �?抢先堵住关键�?    const oppDt = findOpponentDoubleThreat(opp);
+1617	    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端�?    // 把“堵还是进攻”交给搜�?评分按全局分数权衡，避免过度防�?    const threat = resolveThreats(me, opp, false, false);
+1619	    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）�?    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定�?    const book = bookMove(level, me);
+1621	    // 启发式开局策略�?~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）
+1628	  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索�?  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展
+1634	 * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”�? * “防守分（阻挡玩家）”与“中心偏好”选出得分最高的位置�? */
+1636	 * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”�? * “防守分（阻挡对方）”与“中心偏好”选出得分最高的位置�? * 同分/接近分时在前 topN 名里带权随机，避免同一局面永远下同一手�? * @param {string} [level] 当前难度，决定随机候选数
+1640	  const center = (boardSize - 1) / 2;           // 中心坐标随格数变�?
+1645	      const attack = evaluateCell(r, c, me);    // 进攻：自己连�?      const defend = evaluateCell(r, c, opp);   // 防守：阻挡对�?      // 阵法加成：一手能形成双威胁（双三/三四/双四）是五子棋最强的进攻结构�?      // 安静局面下优先布这种“杀招阵型”，而不是零散地凑单线�?      const dtBonus = countThreats(r, c, me) >= 2 ? DOUBLE_THREAT_BONUS : 0;
+1651	  candidates.sort((a, b) => b.s - a.s);         // 分数降序，供 pickVaried 取头�?  return pickVaried(candidates, pickTopN(level));
+1654	/** 假设�?(r, c) 放一�?color 棋，四个方向连子得分之和（含组合加权�?*/
+1660	  // 近似“双�?双四”：同一落点能同时形成两个活三级别的威胁时加权翻倍�?  // 这是五子棋里极难防守的棋形，必须给予额外权重�?  if (total >= LIVE_THREE_SCORE * 2) total *= 2;
+1665	 * 统计�?(dr, dc) 方向�?(r, c) 为中心的连子信息�? * 关键改进：除了连子数与开放端，还计算“这条线是否还有足够空间真正连成五子”，
+1666	 * 避免 AI 去凑“两端被封死、只有四个子的空间”的死棋型�? * @returns {{count: number, open: number, reachable: boolean}}
+1669	 *   reachable  是否有足够空间连成五：count + 两端连续空位�?>= 5
+1678	    for (; i < 5; i++) {            // 数同色连�?      const nr = r + dr * i * dir;
+1680	      if (!inBoard(nr, nc)) break;  // 越界：该端封�?      if (board[nr][nc] === color) {
+1686	    // 连子结束后，数这一端还能连续放下几个空位（最�?4 个）
+1699	  // 可达性：连子�?+ 两端空位数必�?�?5，否则永远凑不成五连�?  // 例：B X X X _ B 的“眠三”只�?1 个空位，3+1=4 < 5，实际是死棋型�?  const reachable = count + totalSpace >= 5;
+1703	/** 沿某方向的连子得分（�?lineInfo 计算出的棋型查表得到�?*/
+1709	/* 棋型评分表（�?连续同色子数，列=开放端�?0/1/2）：
+1710	 * 连得越多、两端越开放，威胁越大。所有静态评估的基础分都查这一张表�? * 后续调“棋型价值”只需改这里一处。注意：reachable=false 的“死棋型�? * （死�?死三等）永远凑不成五连，lineScore 直接�?0，不查表�? * 数值沿用旧版公式：活四(10�? >> 冲四(1�? > 活三(1�? > 眠三(1�? > 活二(1�?�? */
+1717	  [1000000, 1000000, 1000000], // 5 子及以上：已成五�?];
+1720	 * 连子评分（查棋型表）：连得越多、两端越开放，威胁越大�? * reachable=false 的死棋型（死�?死三等）永远无法成五，直接记 0 分，
+1721	 * 避免 AI 为了凑四子而在注定被堵死的线上浪费一手�? */
+1724	  if (!reachable) return 0;                                    // 空间不足，永远无法成�?  return PATTERN_TABLE[count][open] || 0;
+1728	 * 威胁等级：在 (r, c) �?color 后，四个方向中能形成的最强威胁�? * 这是“大局观”的基础指标——AI 依据它判断一步棋究竟是普通落子�? * 活三、冲四还是活四，从而决定进攻还是防守�? * @returns {number} 0=普通落�?1=活三 2=冲四 3=活四 4=五连
+1736	    else if (info.count === 4 && info.open === 2) lv = 3;  // 活四：两端都开，无�?    else if (info.count === 4 && info.open === 1) lv = 2;  // 冲四：单端开，逼对方应�?    else if (info.count === 3 && info.open === 2) lv = 1;  // 活三：能发展成活�?    if (lv > best) best = lv;
+1742	 * 一步必杀检测：若在 (r, c) �?color 能立刻成五则返回该点�? * �?canWinNow 直接数连子，不修改棋盘，速度比“临时落子再判胜”快得多�? */
+1753	/** 快速判断：�?color 放在 (r, c) 后是否形成五连（不修改棋盘） */
+1776	 * 带权随机选点：在得分最高的 topN 个候选中按“排名权重”随机取一�? * （第 1 名权�?1、第 2 �?1/2、第 3 �?1/3……）�? * 效果：面对对方同一种开局，AI 不再永远下同一手，而是从几个同等级
+1777	 * 的好点里随机应变；头部仍大概率命中，强度损失很小�? * moveVariety=0 时退化为取第一名，保证确定性（自动化测试场景）�? * @param {Array<{r:number,c:number,s:number}>} list 已按分数降序的候选列�? * @param {number} topN 参与随机的前几名
+1800	 * 各难度出棋的随机候选数：难度越高越收敛�? * easy 变化最大（新手也能看到多种走法），hard 只在�?2 名里小幅浮动�? */
+1809	 * 威胁分层决策（中�?困难共用，在“一步成五”与 VCF/双杀检测之后调用）�? * 解决三个痛点�? * �?以前 AI 只挡“必成五”，会漏掉对方的活三/眠三（三个子）；
+1810	 * �?残局空位变少时，AI 仍能按威胁优先级行动，而不是东一子西一子乱下；
+1811	 * �?以前挡棋只求“挡住”，不挑位置——现在优先选“挡住又能反击”的落点�? *    把被动防守变成主动进攻，从而更快赢下对局�? * 优先级（从高到低）：
+1812	 *   自己活四 > 挡对方活�?> 挡对方冲四端点（眠三开放端，可选）> 自己活三 > 交给搜索/评分�? * skipOwnAttack=true 时跳过“自己活三”这一档，只返回紧急攻防—�? * 供“先判断对方双杀意图、再决定是否进攻”的调用顺序使用�? * blockRushFours=false 时不强制堵“对方眠三的开放端”（对方三连一端已死）�? * 这种棋型对方即使冲四也只是一步一步被挡，并不构成杀棋；把这一步让�? * 搜索/评分去权衡，AI 就能优先做能赢的棋，而不是机械地处处设防�? * 只有对方存在 VCF 连续冲四杀棋时（getBestMove �?VCF 分支）才强制堵冲四端点�? * 颜色可参数化：AI 决策默认 (aiColor, playerColor)；教学推荐玩家时�?(playerColor, aiColor)�? * @param {boolean} [skipOwnAttack] true=不返回自己活三（留给更高级的进攻判断�? * @param {boolean} [blockRushFours] true=对方眠三开放端（冲四形成点）也强制�? * @returns {Array|null} 需要立即执行的落点 [r, c]，没有紧急威胁则返回 null
+1819	  // 防守反击加分：挡棋点若同时能让我方形成活�?1)/冲四(2)/活四(3)�?  // 额外加权，让 AI 尽量选“既挡得住、又能顺势反击”的位置�?  // 为什么单独再加一次？scoreFor 的进攻分把低价值连线（活一/眠二）也算进来，
+1820	  // 而这里只奖励“真正的强威胁”（活三以上），保证防守选点瞄准反击，而不是零碎连线�?  const counterScore = (r, c) => {
+1825	  // 同等级威胁用启发式分 + 防守反击�?+ 中心偏好决胜�?  // 进攻点只看启发式分与中心偏好；防守点额外叠加反击分，选“能赢的位置”去挡�?  const tieScore = (r, c, defensive) =>
+1847	  if (playerBest && playerBest.lv >= 3) return [playerBest.r, playerBest.c]; // 对方成活四：必须�?  if (blockRushFours && playerBest && playerBest.lv === 2) return [playerBest.r, playerBest.c]; // �?VCF 防守等场景强制堵冲四端点
+1854	 * 生成候选落点：只收集“已有棋子周�?HINT_RADIUS 格内”的空位�? * 再按启发式得分降序取�?limit 个�? * 理由：远离棋子的落点在开局阶段几乎无意义，裁剪可大幅缩小搜索树�? */
+1883	  scored.sort((a, b) => b.s - a.s);   // 降序：高分候选在前，剪枝更有�?  return scored.slice(0, limit).map(({ r, c }) => [r, c]);
+1887	 * 全局面静态评估：AI 方总进攻分 �?玩家方总进攻分 × 1.1�? * 关键改进：每条连线只从“起点”计一次分，避免一条活三被三个子重复计 3 倍，
+1888	 * 棋盘越满评估越失真。防守权重略高（1.1），�?AI 攻防取舍时稍微偏保守�? */
+1890	 * 威胁空间统计（对方威胁空间的评估基础）：围绕 color 棋子，统计“落子后�? * 形成活三以上威胁”的空位，并按威胁等级加权（活三 600 / 冲四 2000 /
+1892	 * 能延伸成活四的选点多的一方更主动；对方威胁空间越大，越不能安心进攻�? * �?comboBonus 的分工：comboBonus 只奖励“一手双威胁”的杀招点，这里把
+1893	 * 普通单线威胁也算进来，让叶节点评估不再只盯着必杀点、有全局大局观�? * 数量上限 cap 控制评估开销（minimax 叶节点调用非常频繁）�? */
+1919	 * 局面评估：己方全部棋型�?�?对方全部棋型分�?.1，另加连接性、中心权重�? * 双威胁组合分与“威胁空间”分（见 threatSpaceBonus）�? * @param {number} [comboWeight] 双威�?威胁空间分的折扣系数：AI 决策�?1�? *        胜率估算�?0.25，避免“双�?活三延伸”这类强而不必胜的棋型把胜率推过�? */
+1931	        // 只统计这条连线的起点（r-dr, c-dc 不是同色子），一行只计一�?        const pr = r - dr, pc = c - dc;
+1938	      // 连接性：与同色相邻的子数（鼓励进攻抱团，避免单子乱飞�?      let adj = 0;
+1950	  // comboWeight：默�?1（AI 决策用，双三=强杀招）；胜率估算时传入折扣系数�?  // 让“双三候选”这类强而不必胜的棋型不至于把胜率推�?98% 的封顶值�?  aiScore += comboBonus(me) * comboWeight;
+1952	  // 威胁空间：双方各有多少个“一手成活三以上”的选点（进攻灵活度/对方反击空间）�?  // 双威胁杀招由 comboBonus 单独计，这里只补单线威胁，避免重复；对方威胁空间
+1953	  // 同样×1.1，让 AI 进攻时始终把对手的反击空间考虑进去（全局大局观）�?  const aiSpace = threatSpaceBonus(me) * comboWeight;
+1958	  // 静态棋型分完全一样，但先手方下一手就能把活三变活四锁定胜局—�?  // 不修正会让浅层搜索严重误判这类“先手决定胜负”的局面�?  if (tempoFor === me) return raw + TEMPO_BONUS;
+1965	 * 对方一步只能堵一处，是极难防守的杀棋。只扫描“己方棋子相邻”的空位�? * 并设数量上限，控制评估开销（否�?minimax 叶节点会明显变慢）�? */
+1989	 * 统计�?(r, c) �?color 后，四个方向中“有效威胁”（活三及以上：
+1990	 * 活三/冲四/活四/五连）的数量。威胁数 �?2 意味着对方一手无法同时处理�? */
+2002	 * 初始化搜索加速表（置换表 + 历史启发）�? * 每次 bestBySearch 开始时调用：重建棋盘哈希、清空置换表，保�? * 哈希随机底数与棋盘状态一致（棋盘可能因前一手落子而变化）�? */
+2005	    // 首次生成 Zobrist 随机底数：每�?(�?�?颜色) 一�?32 位随机整数�?    // �?19×19 固定尺寸�?3/15 棋盘只使用左上部分，不影响哈希正确性�?    ttZobrist = [];
+2016	  // 跨步置换表：ttMap / historyTable / killerTable 在整局内跨落子持续复用�?  // 相同局面（含“轮到谁”与搜索视角）的搜索结果直接复用，后续每一步都�?  // 吃到前几步搜索积累的缓存，同一预算下看得更深。哈希随机底数只在首�?  // 生成、整页稳定；ttStore 在条目超上限时会整体清空，内存有界�?  if (!ttMap) ttMap = new Map();
+2027	/** �?(r,c) 处的 color 棋从棋盘哈希中异或进/出（落子与悔棋各调用一次） */
+2033	/** 写置换表：窗口过窄会�?LOWER/UPPER，完整搜索存 EXACT */
+2041	 * Alpha-Beta 剪枝搜索（困难档核心）�? * 思路：轮流假�?AI（取最大）与玩家（取最小）落子，向前看 searchDepth 决定的层数，
+2042	 * �?alpha/beta 剪掉不可能影响结果的子树；配合置换表（缓存重复局面）�? * 历史启发（好手优先尝试），同一预算能搜得更深。超预算时截断为静态评估�? */
+2044	  // 超时保护：预算耗尽后直接返回静态评估，保证 19 路棋盘下不卡�?  if (searchState && performance.now() - searchState.t0 > searchState.budget) {
+2047	  // 置换表查表：同一局面（含“轮到谁�?“搜索视角”）的搜索结果直接复用�?  // 迭代加深会反复展开同一局面，命中后能省掉整棵子树的重算�?  // 视角 XOR：评估分�?me 为正（AI 执黑与教学推荐玩家时的正负方向相反）�?  // 不加视角会把两个方向的分数混用导致误判；加上后两者各自独立缓存�?  const ttKey = boardHash ^ (isMax ? TT_SIDE_ME : TT_SIDE_OPP)
+2057	  // 任一方向存在一步成�?�?立即返回必胜/必败分，无需继续搜索
+2062	  // ===== 威胁感知的候选生成（强制走法剪枝�?=====
+2063	  // 五子棋的胜负由“活�?冲四”这类强制威胁驱动：一旦某方存在冲四级威胁�?  // 对方只能被迫回应。因此在搜索节点先判断双方威胁，把候选收窄到�?  //   �?对方可一手成活四/成五 �?必须优先堵（除非自己能抢先活�?成五）；
+2064	  //   �?自己能形成冲四级威胁 �?只搜这些强制点（等于�?VCF 思路融进搜索�?  //      分支数从十几个降到几个，同一预算下能顺着杀棋链多看 2~3 层）�?  //   �?否则才回落到常规候选（棋子周围 radius 2 内的启发式选点）�?  const side = isMax ? me : opp;                // 本节点行动方
+2072	    moves = myDanger;                           // 自己能活�?成五：无解进攻优�?  } else {
+2074	    // 单一冲四会被对方一手堵死，若强制只搜它，AI 会盲目冲四挥霍机会—�?    // 普通冲四放回常规候选（getCandidateMoves 仍按启发式把冲四点排得很前）�?    const myForcing = forcingMovesOf(side, 2).filter(([r, c]) => countThreats(r, c, side) >= 2);
+2077	  moves = moves.slice(0, CANDIDATE_LIMIT);      // 仍然限宽，控制分支因�?  // 历史启发：把此前“引发剪�?拿到高分”的落点提前尝试，让剪枝更早发生�?  // 开局阶段历史分全�?0，排序保持原启发式顺序（Array.sort 稳定）�?  if (historyTable) {
+2083	  // 候选的顺序、不新增落点，因此强制走法列表也不会被破坏�?  if (killerTable && killerTable[depth]) {
+2091	  if (moves.length === 0) { ttStore(ttKey, depth, TT_EXACT, 0); return 0; }  // 无子可下（平局�?
+2092	  if (isMax) {                                       // 我方回合：取最�?    let best = -Infinity;
+2112	  } else {                                           // 对方回合：取最�?    let best = Infinity;
+2136	 * 收集 color 一步即可形成“冲四级以上威胁”（minLv=2 冲四 / minLv=3 活四 / 成五）的空位�? * 用于强制走法搜索：这类点落子后对方必须回应，是五子棋的“强制手”�? * @param {number} color 行动方颜�? * @param {number} [minLv] 最低威胁等级（默认 2�? * @returns {Array<Array<number>>} [r, c] 列表
+2143	      // threatLevel 对“成五”返�?4，天�?>= minLv，无需单独�?canWinNow
+2151	 * 动态搜索深度：根据盘面棋子数自动加深层数，兼顾速度与“快点赢”�? * 开局/中盘候选点多，保持 3 层保证响应速度（约 <1s）；
+2152	 * 中后盘与残局时棋子密集、候选点变少，搜索树天然缩小�? * 借助置换�?历史启发压住重复展开后，可放心加深到 5~6 层，
+2153	 * �?AI 看穿更长的杀棋链条，尽早兑现优势、避免拖到百步�? * @returns {number} 本次搜索使用的深�? */
+2161	  if (placed >= 60) return 6;   // 残局后期：候选点很少，可放心加深�?6 �?  if (placed >= 35) return 5;   // 中后盘：候选点已收敛，加深两层尽早兑现优势
+2165	/** 困难档入口：在根节点对每个候选落子模拟一步，再递归搜索并选最�?*/
+2167	 * 困难档搜索入口：迭代加深 + Alpha-Beta�? * 先搜 3 层拿到基准结果，预算内继续加深到 5~6 层（searchDepth 按残局进度定上限）�? * 时间不够就用已完成的最深一层结果；配合置换表与历史启发，同一预算能搜得更深�? * @param {string} [level] 当前难度，仅用于兜底打分时的随机候选数
+2170	  // 重建棋盘哈希（ttMap/historyTable/killerTable 跨步持续复用，见 initSearchTables�?  initSearchTables();
+2171	  // 根节点同样先做必杀检测（能赢立刻赢、该挡立刻挡�?  const aiWin = findImmediateWin(me);
+2175	  // 对方存在一手成双杀的隐�?�?先堵（无更强即时威胁时）
+2184	  // 根候选（启发式排序），并记录原始下标：跨步置换表会让“第二次搜索”更快�?  // 更早知道更多必胜手，并列分数必须按原始候选顺序打破，结果才与缓存状态无�?  let ordered = getCandidateMoves(ROOT_CANDIDATE_LIMIT, me).map((m, i) => ({ r: m[0], c: m[1], idx: i }));
+2187	  // 按残局进度自动加深（searchDepth），depthLimit>0 时封顶（中等档固�?3 层）
+2189	  const startDepth = Math.min(3, maxDepth);   // 至少�?3 层起�?  let bestMove = null;
+2198	      if (performance.now() - searchState.t0 > searchState.budget) break outer; // 预算耗尽：用已完成的�?      board[r][c] = me;
+2199	      hashXor(r, c, me);           // 根节点也维护棋盘哈希，让置换表覆盖整棵子�?      const v = minimax(depth - 1, -Infinity, Infinity, false, me, opp);
+2212	    // 下一层先试，第一手就能撑起更紧的 alpha 窗口，剪枝更早发生�?    scored.sort((a, b) => b.v - a.v || a.idx - b.idx);
+2215	  return bestMove || bestByScore(me, opp, level);  // 兜底：搜索失败时退回单步打�?}
+2217	/** AI 落子入口：分析玩家意�?�?计算最佳点并落�?�?补充 AI 的思路点评 */
+2220	  // 先判断玩家这一步的“目的”（活三进攻 / 冲四 / 酝酿双杀 / 防守…）�?  // �?getBestMove 的防守优先级与教学点评使�?  lastOppIntent = (lastMove && board[lastMove[0]][lastMove[1]] === playerColor)
+2225	  const intent = classifyAiMove(move[0], move[1]);   // 落子前判定意图，保证点评与真实决策一�?  placeStone(move[0], move[1]);
+2230	 * 分析对手（玩家）刚下的一步棋的“目的”，�?AI 能看穿对方的计划�? * 活四/冲四/活三进攻、一手成双杀的陷阱、还是纯防守/布局�? * @param {number} r 对方最后一步行�? * @param {number} c 对方最后一步列�? * @param {number} color 对方颜色
+2236	  const p = analyzePoint(r, c, color);      // 对方这手形成的最大棋�?  let kind = 'normal';
+2239	    kind = 'win'; level = 4;                // 对方已连成五子（理论上已判胜�?  } else if (p.count === 4 && p.open === 2) {
+2247	  // （活四本身已是最高威胁，仍按 live_four 处理；其余组合都升级�?double_threat�?  if (countThreats(r, c, color) >= 2 && level < 4) {
+2251	  // 恰好占了我方的强威胁�?�?对方在防�?  if (kind === 'normal' && threatLevel(r, c, me) >= 1) {
+2257	    live_four: '对方形成活四，必须立即防�?,
+2260	    double_threat: '对方一手形成双威胁（双�?三四/双四）陷�?,
+2261	    block: '对方在防守你的威�?,
+2268	 * 判定 AI 这一步的意图（在落子前计算，基于当前局面）�? * 制胜 > VCF 连杀 > 活四进攻 > 防守反击 > 冲四/活三进攻 > 纯防�?> 开局布局 > 普通落子�? * @returns {string} 一句中文意图说�? */
+2272	  if (canWinNow(r, c, aiColor)) return 'AI 在此连成五子，本局结束�?;
+2274	    return 'AI 发现了一条连续冲四的杀棋路线（VCF），从这里开始步步紧逼�?;
+2276	  // 对手意图感知：AI 判断出玩家这步的目的后给出针对性说�?  if (lastOppIntent && lastOppIntent.level >= 2) {
+2278	    if (lastOppIntent.kind === 'live_four') return 'AI 判断你形成了活四，落在这里必须挡住，否则你就连成五子�?;
+2279	    if (lastOppIntent.kind === 'rush_four') return 'AI 识破你的冲四意图，落子封住这条线�? + (counters ? '，同时展开自己的反击�? : '�?);
+2282	        ? 'AI 判断你在形成活三，选择既能堵住你、又能顺势反击的位置�?
+2283	        : 'AI 识破你的活三意图，先落子压制你的发展�?;
+2285	    if (lastOppIntent.kind === 'double_threat') return 'AI 发现你在酝酿双杀，抢先占住关键点，让陷阱无法成形�?;
+2287	  if (ownLv >= 3) return 'AI 在此形成活四，几乎锁定胜局�?;
+2288	  if (ownLv >= 1 && blocksLv >= 1) return 'AI 在此落子：既防住你的威胁，又顺势形成自己的攻势（防守反击）�?;
+2289	  if (ownLv === 2) return 'AI 在此形成冲四，逼你立刻应对�?;
+2290	  if (ownLv === 1) return 'AI 在此形成活三，展开攻势�?;
+2291	  if (blocksLv >= 2) return 'AI 在此防守你的冲四/活三威胁�?;
+2292	  if (moveCount < OPENING_TOTAL_MOVES) return 'AI 处于开局布局阶段，抢占中心与星位要点�?;
+2293	  return 'AI 选择�?' + formatPos(r, c) + ' 落子，稳固阵型�?;
+2297	 * AI 落子后补充一句思路说明（深度教学版）�? * @param {number} r 行号
+2299	 * @param {string} intent classifyAiMove 给出的意图文�? */
+2303	    showAiComment('AI 连成五子，本局结束�?);
+2306	  showAiComment(intent || 'AI 选择�?' + formatPos(r, c) + ' 落子�?);
+2310	 * 九、教育模式（人机对局专用�? * 说明（深度教学版）：玩家每落一子，AI 按优先级给出点评�? * 获胜 > 错过必杀 > 防守警告 > 双杀赞美 > 更优推荐（玩家视角，带原因）
+2311	 * > 弱棋批评 > 棋型描述（附术语解释）；同时可显示推荐落点�? * 棋盘上还会高亮玩家最后一步的棋型线，并闪�?AI 下一步可成五的危险点�? * ============================================================ */
+2314	 * 分析玩家刚下的一步，返回一句中文点评（深度教学版）�? * 优先级：直接获胜 > 错过必杀 > AI 下一步可成五（防守警告）> 双杀赞美
+2315	 *        > 更优推荐（带原因�? 弱棋批评 > 棋型描述（附术语解释）�? * @param {number} r 行号
+2320	  // �?玩家直接获胜
+2324	  // �?玩家错过必杀：明明可以一步成五，却下在了别处
+2327	    return '这步不是最优：你在 ' + formatPos(missed[0], missed[1]) + ' 可以直接连成五子获胜，错过了一次必杀机会�?;
+2329	  // �?防守警告：AI 下一步可直接成五，且玩家这步没有挡住
+2332	    return '注意防守�? + colorName(aiColor) + '下一步可�?' + formatPos(aiWin[0], aiWin[1]) + ' 连成五子，建议先挡住�?;
+2334	  // �?双杀赞美：玩家这步形成了双三/三四/双四等不可防的组�?  const combo = playerDoubleThreatComment(r, c);
+2336	  // �?更优推荐：用“玩家视角”计算更佳落点（颜色参数化，最多用中等强度保证响应速度�?  const best = getBestMove(eduRecommendLevel(), playerColor);
+2342	        return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：可以直接连成五子获胜！';
+2346	      if (bthr >= 2) return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：能形成双杀，对方很难同时防守�?;
+2347	      if (blv === 3) return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：能形成活四，几乎锁定胜局�?;
+2348	      if (blv === 2) return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：能形成冲四，逼对方应对�?;
+2349	      if (blv === 1) return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：能形成活三，展开攻势�?;
+2350	      return '这步可行，但更推荐下�?' + formatPos(best[0], best[1]) + '：能形成更强的攻势�?;
+2353	  // �?弱棋批评：既无进攻、也无防守价值的落子
+2356	  // �?棋型描述（附术语解释�?  return '�? + patternText(analyzePoint(r, c, playerColor));
+2360	 * 玩家落子后是否形成了双杀（双�?三四/双四）：统计四方向中的威胁方向数�? * 该函数在玩家落子之后调用�?r, c) 的棋已经在棋盘上�? * @returns {string|null} 双杀赞美文案；不是双杀返回 null
+2375	  if (fours >= 2) return '妙手！你形成了双四，' + colorName(aiColor) + '无法同时防守，胜局已定�?;
+2376	  if (fours === 1 && threes >= 1) return '漂亮！你形成了冲�?活三的组合杀�? + colorName(aiColor) + '很难同时应对�?;
+2377	  if (threes >= 2) return '漂亮！你形成了双三，' + colorName(aiColor) + '只能堵住一边，攻势很大�?;
+2382	 * 判断玩家刚下的一步是否为“弱棋”，并给出原因（只返回一条最要紧的）�? * 三种弱棋：漏防对方冲�?活四威胁、毫无威胁的连接、远离战场的游离棋�? * @returns {string|null}
+2386	  const ownLv = threatLevel(r, c, playerColor);     // 落点形成的最强威�?  const blocksAi = threatLevel(r, c, aiColor) >= 1; // 恰好占了 AI 的威胁点（有防守价值）
+2387	  if (own >= 1000 || ownLv >= 1 || blocksAi) return null; // 有活二以上攻势或有防守价�?�?不算弱棋
+2389	  // �?AI 存在未处理的冲四/活四威胁点（只检查棋子周围，控制开销�?  let aiThreat = null;
+2399	    return '这步没有处理' + colorName(aiColor) + '的威胁：' + colorName(aiColor) + '可在 ' + formatPos(aiThreat[0], aiThreat[1]) + ' 形成冲四/活四，建议先防守或做出更强进攻�?;
+2401	  // �?附近�? 格内）没有任何棋�?�?游离�?  let near = false;
+2410	    return '这步比较游离，远离了双方棋子，建议贴近战场展开攻防�?;
+2412	  // �?一般性弱�?  return '这步没有形成有效进攻，也没有防守价值，建议找能做活�?活三的要点�?;
+2416	 * 教学推荐使用�?AI 强度：不超过“中等”�? * 困难档全量搜索（最�?2.5s）用于实战决策；点评/推荐没必要等那么久，
+2417	 * 用中等档即可给出高质量建议，保持交互流畅�? */
+2423	 * 分析某点落子后形成的最大棋型（取四方向中连子数最多、威胁最大的一个）�? * @returns {{count: number, open: number, reachable: boolean}}
+2430	    // 连子数相同时再比较威胁分；同时记录方向，供画布高亮棋型线使用�?    if (info.count > best.count ||
+2443	    if (p.open === 2) return '形成了活四（四子连珠且两端开放），几乎锁定胜局�?;
+2444	    if (p.open === 1) return '形成了冲四（四子连珠且单端开放），对方必须应对�?;
+2445	    return '形成了死四：两端都被封死，无法连成五子�?;
+2449	    if (p.open === 1 && p.reachable) return '形成了眠三，有一定威胁�?;
+2450	    return '形成了死三：两端空间不足，难以连成五子�?;
+2453	    return p.open === 2 ? '形成了活二，可以继续扩展�? : '形成了有限的连接�?;
+2455	  return '完成了落子，继续观察局势�?;
+2471	/** 更新点评面板中“对玩家的点评”一�?*/
+2476	/** 更新点评面板中“AI 思路”一�?*/
+2483	  playerCommentEl.textContent = '教学点评开启后，AI 会点评你的每一步�?;
+2488	 * 九·七、胜率预测（人机对战�? * 说明：用当前局面的静态评估分数估�?AI/玩家胜率，并以色条可视化�? * 算法：先把棋盘评估分（evaluateBoard，AI 视角正分=AI 优）�?tanh 映射�? * 0~1，再缩放成百分比。三个防“假胜率”的措施�? *  1) 98% 封顶只给“轮到的一方”的一步成五（对方马上会挡的冲四不算锁定胜局）；
+2489	 *  2) 双威胁组合分（双三候选）在胜率里�?2.5 折，强但不必胜的棋型只到 60~80%�? *  3) 映射标尺加大，普通优势不再被 tanh 放大�?90%+�? * ============================================================ */
+2492	 * 估算当前局面的胜率（纯棋盘函数，便于测试）�? * @param {number|null} nextPlayer 即将行动的一方（BLACK/WHITE）；null=不区分回�? *   （测试用）。只有“轮到的一方”能一步成五时才锁�?98%——因为对方下一�? *   可以先挡，冲四这类棋型并不等于已经赢了�? * @returns {{player: number, ai: number}} 玩家/AI 胜率百分比（0~100�? */
+2499	  // 静态评�?�?tanh 映射；双威胁组合分打折，避免“双三”等棋型误报�?98%
+2506	/** 刷新胜率面板：仅人机模式且开关开启时显示；终局直接显示 100/0 �?0/100 */
+2515	    player = winLine ? (currentPlayer === playerColor ? 100 : 0) : 50;  // PvE 终局未换�?  } else {
+2516	    // currentPlayer �?updateStatus（换手后）调用时 = 即将行动方；
+2517	    // 传给 estimateWinRate 让“一步成五”的 98% 锁定只对真实行动方生�?    player = estimateWinRate(currentPlayer).player;
+2519	  const playerR = Math.round(player * 10) / 10;          // 统一四舍五入�?0.1�?  const aiR = Math.round((100 - playerR) * 10) / 10;     // 避免出现 31.700000000000003% 的浮点残�?  winRateText.textContent = '�?' + playerR + '% / AI ' + aiR + '%' + (gameOver && !winLine ? '（平局�? : '');
+2525	 * 说明：所有交互入口集中在这里，逻辑函数只负责“做什么”�? * ============================================================ */
+2527	// 棋盘点击统一入口：转发给当前激活的游戏适配器处�?canvas.addEventListener('click', (e) => {
+2533	 * 五子棋的棋盘点击：把屏幕坐标换算成格子坐标后落子�? * 作为 gomokuAdapter.onCanvasClick 的实现，只处理五子棋自己的规则�? */
+2536	  if (gameMode === MODE_PVE && currentPlayer === aiColor) return;  // AI 回合不响�?  if (gameMode === MODE_ONLINE && (!onlineReady || myColor !== currentPlayer)) return;  // 在线：未就绪或没轮到自己
+2538	  // 屏幕坐标 �?格子坐标（四舍五入，点击格子边缘也能命中交叉点）
+2549	// 模式切换：新模式 = 新开一局（转发给当前游戏�?btnPvp.addEventListener('click', () => {
+2566	// 在线对战：进入在线模�?/ 创建房间 / 加入房间 / 断开连接
+2575	    onlineStatusEl.textContent = '请输�?5 位房间号（字母或数字�?;
+2582	// 房间号输入：自动转大写、过滤非法字符，最�?5 �?roomCodeInput.addEventListener('input', () => {
+2586	// 游戏切换：框架级入口，切换前先让旧游戏收�?gameSelect.addEventListener('change', () => switchGame(gameSelect.value));
+2600	// 教学点评 / 推荐点开关：属于“可选能力”，适配器实现了才响�?eduModeToggle.addEventListener('change', () => {
+2612	// 胜率显示开�?winRateToggle.addEventListener('change', () => {
+2617	// 猜先弹窗：切换方�?/ 掷硬�?/ 猜奇�?/ 选择执子 / 跳过
+2648	 * 说明：把五子棋包装成 GameAdapter 注册进框架。国际象棋、围棋�? * 中国象棋的预留骨架见 games/ 目录，实现后同样 registerGame 即可�? * ============================================================ */
+2653	  name: '五子�?,
+2657	  aiLevels: { easy: '简�?, medium: '中等', hard: '困难' },
+2661	  /** 进入五子棋：按当前模式重开一局，并询问“开局猜先�?*/
+2664	  /** 切走前取消未执行�?AI 落子定时器、收起猜先弹窗，并断开在线连接 */
+2685	  /** AI 难度变化：不影响进行中的棋局，只影响之后�?AI 落子与推荐点 */
+2697	  /** 教学点评开�?*/
+2713	  /** 推荐点开�?*/
+2725	// 注册五子棋并启动；页面默认进入双人对战�?9 路棋�?registerGame(gomokuAdapter.id, gomokuAdapter);
+2728	// 邀请链接支持：?room=房间号（�??invite=）打开页面时自动切到在线模式并加入房间�?// 配合 cpolar 公网地址，朋友在微信里点开链接即可直接入局，无需手动输入房间号�?(function autoJoinByInvite() {
+2740	     预留接口：后续游戏骨架（开发中），�?games/ 目录�?     若这些文件缺失（例如只拷贝了�?HTML 文件），五子棋本身不受影响，
+2741	     浏览器控制台可能提示 404，可忽略�?     ============================================================ -->
