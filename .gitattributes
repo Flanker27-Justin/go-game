@@ -32,6 +32,10 @@
 *.cmd    text eol=crlf
 *.ps1    text eol=crlf
 
+# 归档件常带“双扩展名”（如 xxx.js.pre-require / gomoku.html.pre-engine-split），
+# 上面按扩展名的规则匹配不到，这里统一按文本 + LF 处理。
+work/archive/**  text eol=lf
+
 # 二进制：禁止任何换行符转换
 *.png    binary
 *.jpg    binary

@@ -1,0 +1,5 @@
+chore: .gitattributes 覆盖归档件的“双扩展名”文件
+
+work/archive/ 下的文件形如 xxx.js.pre-require / gomoku.html.pre-engine-split，
+按扩展名的规则匹配不到，导致 git add 时仍报 CRLF 警告。补一条 work/archive/** 
+规则统一按文本 + LF 处理，现在 add 全程无警告。
