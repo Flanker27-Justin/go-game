@@ -1,0 +1,19 @@
+# ===== 依赖 =====
+node_modules/
+work/_qrdept/
+
+# ===== 运行/临时产物 =====
+*.log
+
+# ===== 历史遗留的一次性修复产物（曾被误当备份留在根目录）=====
+_fixed.html
+_damaged.txt
+_damaged2.txt
+_damaged3.txt
+_fix1.json
+_bad-summary.txt
+_remaining-bad.txt
+_match-report.txt
+*.damaged-backup
+*.bak-tt
+*.bak-online

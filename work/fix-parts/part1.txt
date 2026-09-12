@@ -1,0 +1,573 @@
+=====OLD-BLOCK=====
+?<!DOCTYPE html>
+=====NEW-BLOCK=====
+<!DOCTYPE html>
+=====END-BLOCK=====
+
+=====OLD-BLOCK=====
+/** 按当前棋盘格数重设画布宽高（19 路最大，�?760px�?*/
+=====NEW-BLOCK=====
+/** 按当前棋盘格数重设画布宽高（19 路最大，约 760px） */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  btnFlipCoin.disabled = true;          // 掷硬�?猜奇偶都只有一次机�?  btnGuessOdd.disabled = true;
+=====NEW-BLOCK=====
+  btnFlipCoin.disabled = true;          // 掷硬币/猜奇偶都只有一次机会
+  btnGuessOdd.disabled = true;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  const guesserName = gameMode === MODE_PVE ? '�? : '玩家1';
+=====NEW-BLOCK=====
+  const guesserName = gameMode === MODE_PVE ? '你' : '玩家1';
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // AI 赢得猜先：自动选黑先行，玩家执白（无需手动选择�?    guessState.winnerBlack = true;
+=====NEW-BLOCK=====
+    // AI 赢得猜先：自动选黑先行，玩家执白（无需手动选择）
+    guessState.winnerBlack = true;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    guessPickTextEl.textContent = 'AI 赢得了猜先，选择执黑先行。你将执白�?;
+=====NEW-BLOCK=====
+    guessPickTextEl.textContent = 'AI 赢得了猜先，选择执黑先行。你将执白。';
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    guessPickTextEl.textContent = winName + ' 赢得了猜先！请选择执子�?;
+=====NEW-BLOCK=====
+    guessPickTextEl.textContent = winName + ' 赢得了猜先！请选择执子：';
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 应用猜先结果�? * @param {boolean|null} pickBlack true=赢家执黑 false=赢家执白 null=使用 AI 自动选择的结�? * 人机模式�?playerColor/aiColor；双人模式写 p1Color（玩�? 取相反颜色）�? */
+=====NEW-BLOCK=====
+ * 应用猜先结果。
+ * @param {boolean|null} pickBlack true=赢家执黑 false=赢家执白 null=使用 AI 自动选择的结果
+ * 人机模式写 playerColor/aiColor；双人模式写 p1Color（玩家2 取相反颜色）。 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 玩家选执�?�?AI 执黑先行，先调度 AI 首步
+=====NEW-BLOCK=====
+  // 玩家选执白 → AI 执黑先行，先调度 AI 首步
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 教育模式下按新的玩家颜色刷新推荐点与危险点高�?  if (eduMode && gameMode === MODE_PVE && currentPlayer === playerColor && !gameOver) {
+=====NEW-BLOCK=====
+  // 教育模式下按新的玩家颜色刷新推荐点与危险点高亮
+  if (eduMode && gameMode === MODE_PVE && currentPlayer === playerColor && !gameOver) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 六、胜负判�? * 说明：只检查“刚落的子”是否成五——能成五的连线必然穿过它�? * ============================================================ */
+=====NEW-BLOCK=====
+ * 六、胜负判定
+ * 说明：只检查“刚落的子”是否成五——能成五的连线必然穿过它。
+ * ============================================================ */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 检查以 (r, c) 为最后一子是否形成五连�? * @returns {Array|null} 整条连线的坐标数组（供高亮绘制），没有则返回 null�? */
+=====NEW-BLOCK=====
+ * 检查以 (r, c) 为最后一子是否形成五连。
+ * @returns {Array|null} 整条连线的坐标数组（供高亮绘制），没有则返回 null。 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 以落子点为中心，沿当前方向向两端延伸，收集同色棋�?    const line = [[r, c]];
+=====NEW-BLOCK=====
+    // 以落子点为中心，沿当前方向向两端延伸，收集同色棋子
+    const line = [[r, c]];
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 七、绘制（数据 �?画面�? * 说明：每次全量重绘，只读 board 与少量状态，保证画面与数据永远一致�? * ============================================================ */
+=====NEW-BLOCK=====
+ * 七、绘制（数据 → 画面）
+ * 说明：每次全量重绘，只读 board 与少量状态，保证画面与数据永远一致。
+ * ============================================================ */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  drawStones();     // 所有棋�?  drawLastMove();   // 最后一步标记（小红点）
+=====NEW-BLOCK=====
+  drawStones();     // 所有棋子
+  drawLastMove();   // 最后一步标记（小红点）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  drawTeaching();   // 教学模式：玩家棋型高�?+ AI 危险点闪�?  drawHint();       // 教育模式推荐点（半透明圆圈�?  updateTeachBlink(); // 按需启动/停止危险点闪烁动�?}
+=====NEW-BLOCK=====
+  drawTeaching();   // 教学模式：玩家棋型高亮 + AI 危险点闪烁
+  drawHint();       // 教育模式推荐点（半透明圆圈）
+  updateTeachBlink(); // 按需启动/停止危险点闪烁动画
+}
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 网格：横、竖�?boardSize 条线
+=====NEW-BLOCK=====
+  // 网格：横、竖各 boardSize 条线
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 星位：天�?+ 四角星。公式保�?13/15/19 路都能落在标准位�?  const center = (boardSize - 1) / 2;
+=====NEW-BLOCK=====
+  // 星位：天元 + 四角星。公式保证 13/15/19 路都能落在标准位置
+  const center = (boardSize - 1) / 2;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 绘制全部棋子：黑子深色实心，白子浅色带描�?*/
+=====NEW-BLOCK=====
+/** 绘制全部棋子：黑子深色实心，白子浅色带描边 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 用红线连接获胜五子，结果一目了�?*/
+=====NEW-BLOCK=====
+/** 用红线连接获胜五子，结果一目了然 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 教学模式绘制层：高亮玩家最后一步的棋型线，并闪�?AI 下一步可成五的危险点 */
+=====NEW-BLOCK=====
+/** 教学模式绘制层：高亮玩家最后一步的棋型线，并闪烁 AI 下一步可成五的危险点 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // �?玩家最后一步形成的棋型方向：黄色半透明粗线（画在棋子之上，
+=====NEW-BLOCK=====
+  // ① 玩家最后一步形成的棋型方向：黄色半透明粗线（画在棋子之上，
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  //    直观展示“这步形成了活三/冲四”等棋型走向�?  if (lastMove && board[lastMove[0]][lastMove[1]] === playerColor) {
+=====NEW-BLOCK=====
+  //    直观展示“这步形成了活三/冲四”等棋型走向）
+  if (lastMove && board[lastMove[0]][lastMove[1]] === playerColor) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // �?AI 下一步可成五的危险点：红色圆圈，�?300ms 节奏闪烁，提醒玩家先防守
+=====NEW-BLOCK=====
+  // ② AI 下一步可成五的危险点：红色圆圈，随 300ms 节奏闪烁，提醒玩家先防守
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 说明�? * - 简单：纯单步启发式打分�? * - 中等：在打分基础上增加“一步必杀/挡杀”检测、VCF 连续冲四杀棋�? *         双杀（双�?双四）威胁识别、双�?双四组合加权、威胁分层决�? *         （含“防守反击”选点）、开局库（�?5 手查表）与规则式开局策略兜底�? * - 困难：再叠加 Alpha-Beta 剪枝搜索，搜索深度随残局进度自动加深�?�?�? 层）�? *         单步思考预算最长约 4s，中后盘与残局能看穿更长的杀棋链条�? * 统一入口 getBestMove(level, forColor)：AI 落子�?aiColor 视角�? * 教学推荐�?点评�?playerColor（玩家）视角，保证建议真正利于玩家�? * 猜先功能可让玩家执白、AI 执黑，因此所�?AI 决策一律以 aiColor 为准�? * ============================================================ */
+=====NEW-BLOCK=====
+ * 说明：
+ * - 简单：纯单步启发式打分；
+ * - 中等：在打分基础上增加“一步必杀/挡杀”检测、VCF 连续冲四杀棋、
+ *         双杀（双四/活四）威胁识别、双三/双四组合加权、威胁分层决策
+ *         （含“防守反击”选点）、开局库（前 9 手查表）与规则式开局策略兜底；
+ * - 困难：再叠加 Alpha-Beta 剪枝搜索，搜索深度随残局进度自动加深（3→5→6 层），
+ *         单步思考预算最长约 4s，中后盘与残局能看穿更长的杀棋链条。
+ * 统一入口 getBestMove(level, forColor)：AI 落子用 aiColor 视角；
+ * 教学推荐点/点评用 playerColor（玩家）视角，保证建议真正利于玩家。
+ * 猜先功能可让玩家执白、AI 执黑，因此所有 AI 决策一律以 aiColor 为准。
+ * ============================================================ */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * VCF（Victory by Continuous Fours，连续冲四）杀棋检测�? * 思路：连续下“冲四”，对方每一步都只能被迫挡这个冲四，
+=====NEW-BLOCK=====
+ * VCF（Victory by Continuous Fours，连续冲四）杀棋检测。
+ * 思路：连续下“冲四”，对方每一步都只能被迫挡这个冲四，
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 一路把对方带到“活�?五连”为止——这就是一条强制胜序列�? * 命中时返回当前这一步（首个强制落点），并把完整路径存入 lastVcfPath 供教学展示�? * @param {number} color 进攻方颜�? * @param {number} maxPlies 最大搜索层数（每层 = 己方一�?+ 对方一手）
+=====NEW-BLOCK=====
+ * 一路把对方带到“活四/五连”为止——这就是一条强制胜序列。
+ * 命中时返回当前这一步（首个强制落点），并把完整路径存入 lastVcfPath 供教学展示。
+ * @param {number} color 进攻方颜色
+ * @param {number} maxPlies 最大搜索层数（每层 = 己方一手 + 对方一手）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 对方已可一步成�?�?VCF 前提不成立（必须先防守）�?  // 我方已可一步成�?�?交给 findImmediateWin 处理即可�?  if (findImmediateWin(opp) || findImmediateWin(color)) return null;
+=====NEW-BLOCK=====
+  // 对方已可一步成五 → VCF 前提不成立（必须先防守）；
+  // 我方已可一步成五 → 交给 findImmediateWin 处理即可。
+  if (findImmediateWin(opp) || findImmediateWin(color)) return null;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 记录“最短连杀路径”：同一局面往往存在多条 VCF 路线，优先走手数最短的�?  // 因为对方被迫应的手数越少，越没有机会中途反杀，杀棋越稳�?  const vcf = { nodes: 0, t0: performance.now(), budget: VCF_TIME_BUDGET_MS, cur: [], bestLen: Infinity, bestPath: null };
+=====NEW-BLOCK=====
+  // 记录“最短连杀路径”：同一局面往往存在多条 VCF 路线，优先走手数最短的，
+  // 因为对方被迫应的手数越少，越没有机会中途反杀，杀棋越稳。
+  const vcf = { nodes: 0, t0: performance.now(), budget: VCF_TIME_BUDGET_MS, cur: [], bestLen: Infinity, bestPath: null };
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * VCF 递归主体�? * @param {number|null} lastR 上一手落点行（用于快速判五，null 表示根节点）
+=====NEW-BLOCK=====
+ * VCF 递归主体。
+ * @param {number|null} lastR 上一手落点行（用于快速判五，null 表示根节点）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * @returns {number} 从该节点取胜所需最少“己方手数”（>0 表示必胜�?1 表示无解/超限�? */
+=====NEW-BLOCK=====
+ * @returns {number} 从该节点取胜所需最少“己方手数”（>0 表示必胜，-1 表示无解/超限） */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  if (++vcf.nodes > VCF_NODE_LIMIT) return -1;               // 节点上限防卡�?  if (performance.now() - vcf.t0 > vcf.budget) return -1;    // 时间上限防卡�?  if (lastR !== null && canWinNow(lastR, lastC, color)) {
+=====NEW-BLOCK=====
+  if (++vcf.nodes > VCF_NODE_LIMIT) return -1;               // 节点上限防卡顿
+  if (performance.now() - vcf.t0 > vcf.budget) return -1;    // 时间上限防卡顿
+  if (lastR !== null && canWinNow(lastR, lastC, color)) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    if (vcf.cur.length < vcf.bestLen) {                      // vcf.cur 即“根到当前手”完整路�?      vcf.bestLen = vcf.cur.length;
+=====NEW-BLOCK=====
+    if (vcf.cur.length < vcf.bestLen) {                      // vcf.cur 即“根到当前手”完整路径
+      vcf.bestLen = vcf.cur.length;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      len = 1;                              // 直接成五或形成活四：对方无法一手化�?      if (vcf.cur.length < vcf.bestLen) {
+=====NEW-BLOCK=====
+      len = 1;                              // 直接成五或形成活四：对方无法一手化解
+      if (vcf.cur.length < vcf.bestLen) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+        len = 1;                            // 双四：对方只能堵一处，另一处照样成�?        if (vcf.cur.length < vcf.bestLen) {
+=====NEW-BLOCK=====
+        len = 1;                            // 双四：对方只能堵一处，另一处照样成五
+        if (vcf.cur.length < vcf.bestLen) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+        if (sub > 0) len = sub + 1;         // 对方堵住后我们仍能连杀，总手�?+1
+=====NEW-BLOCK=====
+        if (sub > 0) len = sub + 1;         // 对方堵住后我们仍能连杀，总手数+1
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 只保留手数最短的分支：杀棋越短越稳（vcfForcingMoves 已按威胁等级排序�?    if (len > 0 && len < bestLen) { bestLen = len; bestMove = [r, c]; }
+=====NEW-BLOCK=====
+    // 只保留手数最短的分支：杀棋越短越稳（vcfForcingMoves 已按威胁等级排序）
+    if (len > 0 && len < bestLen) { bestLen = len; bestMove = [r, c]; }
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 根节点处把最短路径起点记录下来，�?findVcfWin 返回
+=====NEW-BLOCK=====
+  // 根节点处把最短路径起点记录下来，供 findVcfWin 返回
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 收集“落子后能形成冲�?活四/五连”的候选点，按威胁等级与启发式分降�?*/
+=====NEW-BLOCK=====
+/** 收集“落子后能形成冲四/活四/五连”的候选点，按威胁等级与启发式分降序 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 我方�?(r, c) 落子形成冲四后，对方必须堵住的开放端点（冲四只有一个端点） */
+=====NEW-BLOCK=====
+/** 我方在 (r, c) 落子形成冲四后，对方必须堵住的开放端点（冲四只有一个端点） */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 双杀检测：一手落子后形成“不可防”的双重威胁（双�?/ 活四+任意），
+=====NEW-BLOCK=====
+ * 双杀检测：一手落子后形成“不可防”的双重威胁（双四 / 活四+任意），
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 对方一步只能处理其中一处，另一处下一手必然成五�? * @returns {Array|null} [r, c]
+=====NEW-BLOCK=====
+ * 对方一步只能处理其中一处，另一处下一手必然成五。
+ * @returns {Array|null} [r, c]
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      let forcing = 0;                        // 冲四/活四方向�?      for (const [dr, dc] of DIRECTIONS) {
+=====NEW-BLOCK=====
+      let forcing = 0;                        // 冲四/活四方向数
+      for (const [dr, dc] of DIRECTIONS) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      if (maxLv < 3 && forcing < 2) continue; // 只有活四�?）或双冲四（2+2）才算不可防
+=====NEW-BLOCK=====
+      if (maxLv < 3 && forcing < 2) continue; // 只有活四（3）或双冲四（2+2）才算不可防
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 双三/双威胁“阵法杀招”检测：一手落子后形成两个“活三以上”威�? * （双�?/ 活三+冲四 / 双四），对方一步只能堵一处，是五子棋最典型�? * 必胜阵型——中盘把握住它就能把优势直接兑现成杀棋�? * 前提：对方没有更快威胁（不能一步成五、也不能一手成活四），
+=====NEW-BLOCK=====
+ * 双三/双威胁“阵法杀招”检测：一手落子后形成两个“活三以上”威胁
+ * （双三/活三+冲四/双四），对方一步只能堵一处，是五子棋最典型的
+ * 必胜阵型——中盘把握住它就能把优势直接兑现成杀棋。
+ * 前提：对方没有更快威胁（不能一步成五、也不能一手成活四），
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 否则必须先防守，双杀只是空谈�? * @param {number} color 行动方颜�? * @returns {Array|null} 杀招落�?[r, c]；不存在则返�?null
+=====NEW-BLOCK=====
+ * 否则必须先防守，双杀只是空谈。
+ * @param {number} color 行动方颜色
+ * @returns {Array|null} 杀招落点 [r, c]；不存在则返回 null
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  if (findImmediateWin(opp)) return null;   // 对方能一步成�?�?必须先挡
+=====NEW-BLOCK=====
+  if (findImmediateWin(opp)) return null;   // 对方能一步成五 → 必须先挡
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      // 比我方双三（约三子内成五）更快，必须放弃进攻先防�?      if (threatLevel(r, c, opp) >= 3) return null;
+=====NEW-BLOCK=====
+      // 比我方双三（约三子内成五）更快，必须放弃进攻先防守
+      if (threatLevel(r, c, opp) >= 3) return null;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 找出“对方下一步落子即可一手形�?�? 个活三以上威胁（双三/三四/双四）”的空位�? * 这类点一旦让给对方，对方就拥有不可防的强制胜，因此我方必须抢先占住�? * 选点优先“挡住后自己还能顺势反击”的位置（用己方视角�?scoreFor 决胜）�? * @param {number} color 对方颜色
+=====NEW-BLOCK=====
+ * 找出“对方下一步落子即可一手形成 ≥2 个活三以上威胁（双三/三四/双四）”的空位。
+ * 这类点一旦让给对方，对方就拥有不可防的强制胜，因此我方必须抢先占住。
+ * 选点优先“挡住后自己还能顺势反击”的位置（用己方视角的 scoreFor 决胜）。
+ * @param {number} color 对方颜色
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * @returns {Array|null} 需要堵住的�?[r, c]；不存在则返�?null
+=====NEW-BLOCK=====
+ * @returns {Array|null} 需要堵住的点 [r, c]；不存在则返回 null
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      // countThreats 会“假装”在该点落子统计威胁数（lineInfo 不写棋盘�?      if (countThreats(r, c, color) >= 2) {
+=====NEW-BLOCK=====
+      // countThreats 会“假装”在该点落子统计威胁数（lineInfo 不写棋盘）
+      if (countThreats(r, c, color) >= 2) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 开局策略（AI 前若干手）：把落点限制在中心 9×9 区域�? * 优先选“与已有己方子构成两个方向发展”的点；对方占天元时呼应天元旁星位�? * 从得分最高的前几名里带权随机选一手，�?AI 面对同一种开局时出棋不重样�? * @param {string} [level] 当前难度，决定随机候选数（简单变化大、困难收敛）
+=====NEW-BLOCK=====
+ * 开局策略（AI 前若干手）：把落点限制在中心 9×9 区域，
+ * 优先选“与已有己方子构成两个方向发展”的点；对方占天元时呼应天元旁星位。
+ * 从得分最高的前几名里带权随机选一手，让 AI 面对同一种开局时出棋不重样。
+ * @param {string} [level] 当前难度，决定随机候选数（简单变化大、困难收敛）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 用棋盘上的棋子数判断是否仍在开局阶段（不依赖外部状态，便于测试�?  let placed = 0;
+=====NEW-BLOCK=====
+  // 用棋盘上的棋子数判断是否仍在开局阶段（不依赖外部状态，便于测试）
+  let placed = 0;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      // 双方向发展：落子后能在两个不同方向延伸已有己方子 �?开局更灵�?      let dirs = 0;
+=====NEW-BLOCK=====
+      // 双方向发展：落子后能在两个不同方向延伸已有己方子 → 开局更灵活
+      let dirs = 0;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  candidates.sort((a, b) => b.s - a.s);             // 分数降序，供 pickVaried 取头�?  return pickVaried(candidates, pickTopN(level, 'opening'));
+=====NEW-BLOCK=====
+  candidates.sort((a, b) => b.s - a.s);             // 分数降序，供 pickVaried 取头部
+  return pickVaried(candidates, pickTopN(level, 'opening'));
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 开局库查询：把当前局面做 8 对称规范化后查表，命中则返回库内应答�? * 开局库由 work/gen-opening-book.js 用引擎自身深�?2 搜索生成，覆�? * 盘面 0~5 子（�?5 手）。命中时 AI 开局有章法、响应快，且同一开局�? * 按权重随机换着下（配合 moveVariety�?=恒取最强，>0 按权�?5~1 随机�? * hard 只在�?2 名里浮动、medium �?3 名，兼顾强度与“变幻莫测”）�? * @param {string} level 难度档位，决定随机候选范�? * @param {number} side 行动方颜色（BLACK/WHITE），决定查表 key 的前缀
+=====NEW-BLOCK=====
+ * 开局库查询：把当前局面做 8 对称规范化后查表，命中则返回库内应答。
+ * 开局库由 work/gen-opening-book.js 用引擎自身深度 3 搜索生成，覆盖
+ * 盘面 0~8 子（前 9 手）。命中时 AI 开局有章法、响应快，且同一开局
+ * 按权重随机换着下（配合 moveVariety：=0 恒取最强，>0 按权重 5~1 随机）；
+ * hard 只在前 2 名里浮动、medium 前 3 名，兼顾强度与“变幻莫测”。
+ * @param {string} level 难度档位，决定随机候选范围
+ * @param {number} side 行动方颜色（BLACK/WHITE），决定查表 key 的前缀
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 8 对称变换表（与生成器一致）：相对天元坐�?(x,y)=(r-center, c-center)�?  // INV 为逆变换，把库内“规范朝向”的相对坐标还原到当前棋盘的实际朝向
+=====NEW-BLOCK=====
+  // 8 对称变换表（与生成器一致）：相对天元坐标 (x,y)=(r-center, c-center)。
+  // INV 为逆变换，把库内“规范朝向”的相对坐标还原到当前棋盘的实际朝向
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 规范化：�?8 个朝向里“字典序最小的棋子坐标串”作�?key�?  // 同一开局无论旋转/镜像都命中同一�?key（生成器与这里完全一致）
+=====NEW-BLOCK=====
+  // 规范化：从 8 个朝向里“字典序最小的棋子坐标串”作为 key。
+  // 同一开局无论旋转/镜像都命中同一个 key（生成器与这里完全一致）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 按难度限制随机候选数并带权选取（权�?5~1 = 生成器的搜索分排序）
+=====NEW-BLOCK=====
+  // 按难度限制随机候选数并带权选取（权重 5~1 = 生成器的搜索分排序）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 逆对称还原绝对坐标；13/15 小棋盘越界或目标已被占时返回 null，交由上层兜�?  const [x, y] = SYM[INV[bestSym]](entries[idx][0], entries[idx][1]);
+=====NEW-BLOCK=====
+  // 逆对称还原绝对坐标；13/15 小棋盘越界或目标已被占时返回 null，交由上层兜底
+  const [x, y] = SYM[INV[bestSym]](entries[idx][0], entries[idx][1]);
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 获取当前难度下的最佳落点�? * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD�? * @param {number} [forColor] 计算视角的颜色；缺省�?aiColor（AI 实战决策）�? *        教学推荐点时�?playerColor，用“玩家视角”计算，保证建议真正利于玩家�? * @returns {Array|null} [r, c]
+=====NEW-BLOCK=====
+ * 获取当前难度下的最佳落点。
+ * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD）
+ * @param {number} [forColor] 计算视角的颜色；缺省用 aiColor（AI 实战决策）；
+ *        教学推荐点时用 playerColor，用“玩家视角”计算，保证建议真正利于玩家。
+ * @returns {Array|null} [r, c]
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 简单档保持“入门”定位：不做复杂威胁分层，但最基本的“能赢就赢�?    // 对方要赢了必须挡”不能漏，否�?AI 会犯低级失误、体验很差�?    const easyWin = findImmediateWin(me);
+=====NEW-BLOCK=====
+    // 简单档保持“入门”定位：不做复杂威胁分层，但最基本的“能赢就赢、
+    // 对方要赢了必须挡”不能漏，否则 AI 会犯低级失误、体验很差。
+    const easyWin = findImmediateWin(me);
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 中等/困难档：完整威胁分层（一步成�?�?VCF �?双杀 �?活四/活三攻防 �?开局�?�?启发式开局 �?搜索�?  {
+=====NEW-BLOCK=====
+  // 中等/困难档：完整威胁分层（一步成五 → VCF → 双杀 → 活四/活三攻防 → 开局库 → 启发式开局 → 搜索）
+  {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    const aiWin = findImmediateWin(me);            // 自己能一步成�?�?直接�?    if (aiWin) return aiWin;
+=====NEW-BLOCK=====
+    const aiWin = findImmediateWin(me);            // 自己能一步成五 → 直接赢
+    if (aiWin) return aiWin;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    const playerWin = findImmediateWin(opp);       // 对方能一步成�?�?必须�?    if (playerWin) return playerWin;
+=====NEW-BLOCK=====
+    const playerWin = findImmediateWin(opp);       // 对方能一步成五 → 必须挡
+    if (playerWin) return playerWin;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 双杀：一手形成双�?活四等不可防威胁
+=====NEW-BLOCK=====
+    // 双杀：一手形成双四/活四等不可防威胁
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 双三/三四/双四“阵法杀招”：一手形成双威胁且对方无更快威胁 �?主动建立必胜阵型
+=====NEW-BLOCK=====
+    // 双三/三四/双四“阵法杀招”：一手形成双威胁且对方无更快威胁 → 主动建立必胜阵型
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 对方双杀意图防守：对方下一步一手可成双�?三四/双四 �?抢先堵住关键�?    const oppDt = findOpponentDoubleThreat(opp);
+=====NEW-BLOCK=====
+    // 对方双杀意图防守：对方下一步一手可成双三/三四/双四 → 抢先堵住关键点
+    const oppDt = findOpponentDoubleThreat(opp);
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端�?    // 把“堵还是进攻”交给搜�?评分按全局分数权衡，避免过度防�?    const threat = resolveThreats(me, opp, false, false);
+=====NEW-BLOCK=====
+    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端。
+    // 把“堵还是进攻”交给搜索/评分按全局分数权衡，避免过度防守。
+    const threat = resolveThreats(me, opp, false, false);
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）�?    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定�?    const book = bookMove(level, me);
+=====NEW-BLOCK=====
+    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）。
+    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定式。
+    const book = bookMove(level, me);
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 启发式开局策略�?~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）
+=====NEW-BLOCK=====
+    // 启发式开局策略（0~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索�?  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展
+=====NEW-BLOCK=====
+  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索，
+  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”�? * “防守分（阻挡玩家）”与“中心偏好”选出得分最高的位置�? */
+=====NEW-BLOCK=====
+ * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”、
+ * “防守分（阻挡玩家）”与“中心偏好”选出得分最高的位置。 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”�? * “防守分（阻挡对方）”与“中心偏好”选出得分最高的位置�? * 同分/接近分时在前 topN 名里带权随机，避免同一局面永远下同一手�? * @param {string} [level] 当前难度，决定随机候选数
+=====NEW-BLOCK=====
+ * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”、
+ * “防守分（阻挡对方）”与“中心偏好”选出得分最高的位置。
+ * 同分/接近分时在前 topN 名里带权随机，避免同一局面永远下同一手。
+ * @param {string} [level] 当前难度，决定随机候选数
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  const center = (boardSize - 1) / 2;           // 中心坐标随格数变�?
+=====NEW-BLOCK=====
+  const center = (boardSize - 1) / 2;           // 中心坐标随格数变化
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      const attack = evaluateCell(r, c, me);    // 进攻：自己连�?      const defend = evaluateCell(r, c, opp);   // 防守：阻挡对�?      // 阵法加成：一手能形成双威胁（双三/三四/双四）是五子棋最强的进攻结构�?      // 安静局面下优先布这种“杀招阵型”，而不是零散地凑单线�?      const dtBonus = countThreats(r, c, me) >= 2 ? DOUBLE_THREAT_BONUS : 0;
+=====NEW-BLOCK=====
+      const attack = evaluateCell(r, c, me);    // 进攻：自己连线
+      const defend = evaluateCell(r, c, opp);   // 防守：阻挡对方
+      // 阵法加成：一手能形成双威胁（双三/三四/双四）是五子棋最强的进攻结构，
+      // 安静局面下优先布这种“杀招阵型”，而不是零散地凑单线。
+      const dtBonus = countThreats(r, c, me) >= 2 ? DOUBLE_THREAT_BONUS : 0;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  candidates.sort((a, b) => b.s - a.s);         // 分数降序，供 pickVaried 取头�?  return pickVaried(candidates, pickTopN(level));
+=====NEW-BLOCK=====
+  candidates.sort((a, b) => b.s - a.s);         // 分数降序，供 pickVaried 取头部
+  return pickVaried(candidates, pickTopN(level));
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 假设�?(r, c) 放一�?color 棋，四个方向连子得分之和（含组合加权�?*/
+=====NEW-BLOCK=====
+/** 假设在 (r, c) 放一颗 color 棋，四个方向连子得分之和（含组合加权） */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 近似“双�?双四”：同一落点能同时形成两个活三级别的威胁时加权翻倍�?  // 这是五子棋里极难防守的棋形，必须给予额外权重�?  if (total >= LIVE_THREE_SCORE * 2) total *= 2;
+=====NEW-BLOCK=====
+  // 近似“双三/双四”：同一落点能同时形成两个活三级别的威胁时加权翻倍。
+  // 这是五子棋里极难防守的棋形，必须给予额外权重。
+  if (total >= LIVE_THREE_SCORE * 2) total *= 2;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 统计�?(dr, dc) 方向�?(r, c) 为中心的连子信息�? * 关键改进：除了连子数与开放端，还计算“这条线是否还有足够空间真正连成五子”，
+=====NEW-BLOCK=====
+ * 统计在 (dr, dc) 方向上以 (r, c) 为中心的连子信息。
+ * 关键改进：除了连子数与开放端，还计算“这条线是否还有足够空间真正连成五子”，
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 避免 AI 去凑“两端被封死、只有四个子的空间”的死棋型�? * @returns {{count: number, open: number, reachable: boolean}}
+=====NEW-BLOCK=====
+ * 避免 AI 去凑“两端被封死、只有四个子的空间”的死棋型。
+ * @returns {{count: number, open: number, reachable: boolean}}
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ *   reachable  是否有足够空间连成五：count + 两端连续空位�?>= 5
+=====NEW-BLOCK=====
+ *   reachable  是否有足够空间连成五：count + 两端连续空位数 >= 5
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    for (; i < 5; i++) {            // 数同色连�?      const nr = r + dr * i * dir;
+=====NEW-BLOCK=====
+    for (; i < 5; i++) {            // 数同色连子
+      const nr = r + dr * i * dir;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+      if (!inBoard(nr, nc)) break;  // 越界：该端封�?      if (board[nr][nc] === color) {
+=====NEW-BLOCK=====
+      if (!inBoard(nr, nc)) break;  // 越界：该端封死
+      if (board[nr][nc] === color) {
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+    // 连子结束后，数这一端还能连续放下几个空位（最�?4 个）
+=====NEW-BLOCK=====
+    // 连子结束后，数这一端还能连续放下几个空位（最多 4 个）
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  // 可达性：连子�?+ 两端空位数必�?�?5，否则永远凑不成五连�?  // 例：B X X X _ B 的“眠三”只�?1 个空位，3+1=4 < 5，实际是死棋型�?  const reachable = count + totalSpace >= 5;
+=====NEW-BLOCK=====
+  // 可达性：连子数 + 两端空位数必须 >= 5，否则永远凑不成五连。
+  // 例：B X X X _ B 的“眠三”只有 1 个空位，3+1=4 < 5，实际是死棋型。
+  const reachable = count + totalSpace >= 5;
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/** 沿某方向的连子得分（�?lineInfo 计算出的棋型查表得到�?*/
+=====NEW-BLOCK=====
+/** 沿某方向的连子得分（由 lineInfo 计算出的棋型查表得到） */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+/* 棋型评分表（�?连续同色子数，列=开放端�?0/1/2）：
+=====NEW-BLOCK=====
+/* 棋型评分表（行=连续同色子数，列=开放端数 0/1/2）：
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 连得越多、两端越开放，威胁越大。所有静态评估的基础分都查这一张表�? * 后续调“棋型价值”只需改这里一处。注意：reachable=false 的“死棋型�? * （死�?死三等）永远凑不成五连，lineScore 直接�?0，不查表�? * 数值沿用旧版公式：活四(10�? >> 冲四(1�? > 活三(1�? > 眠三(1�? > 活二(1�?�? */
+=====NEW-BLOCK=====
+ * 连得越多、两端越开放，威胁越大。所有静态评估的基础分都查这一张表。
+ * 后续调“棋型价值”只需改这里一处。注意：reachable=false 的“死棋型”
+ * （死四/死三等）永远凑不成五连，lineScore 直接记 0，不查表。
+ * 数值沿用旧版公式：活四(100000) >> 冲四(10000) > 活三(10000) > 眠三(1000) > 活二(1000)。 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  [1000000, 1000000, 1000000], // 5 子及以上：已成五�?];
+=====NEW-BLOCK=====
+  [1000000, 1000000, 1000000], // 5 子及以上：已成五连
+];
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 连子评分（查棋型表）：连得越多、两端越开放，威胁越大�? * reachable=false 的死棋型（死�?死三等）永远无法成五，直接记 0 分，
+=====NEW-BLOCK=====
+ * 连子评分（查棋型表）：连得越多、两端越开放，威胁越大。
+ * reachable=false 的死棋型（死四/死三等）永远无法成五，直接记 0 分，
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+ * 避免 AI 为了凑四子而在注定被堵死的线上浪费一手�? */
+=====NEW-BLOCK=====
+ * 避免 AI 为了凑四子而在注定被堵死的线上浪费一手。 */
+=====END-BLOCK=====
+=====OLD-BLOCK=====
+  if (!reachable) return 0;                                    // 空间不足，永远无法成�?  return PATTERN_TABLE[count][open] || 0;
+=====NEW-BLOCK=====
+  if (!reachable) return 0;                                    // 空间不足，永远无法成五
+  return PATTERN_TABLE[count][open] || 0;
+=====END-BLOCK=====

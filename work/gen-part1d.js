@@ -1,0 +1,57 @@
+const fs = require('fs');
+const p = 'work/fix-parts/part1.txt';
+let cur = fs.readFileSync(p, 'utf8');
+const blocks = [
+  ['  if (findImmediateWin(opp)) return null;   // 对方能一步成\uFFFD?\uFFFD?必须先挡', '  if (findImmediateWin(opp)) return null;   // 对方能一步成五 → 必须先挡'],
+  ['      // 比我方双三（约三子内成五）更快，必须放弃进攻先防\uFFFD?      if (threatLevel(r, c, opp) >= 3) return null;', '      // 比我方双三（约三子内成五）更快，必须放弃进攻先防守\n      if (threatLevel(r, c, opp) >= 3) return null;'],
+  [' * 找出“对方下一步落子即可一手形\uFFFD?\uFFFD? 个活三以上威胁（双三/三四/双四）”的空位\uFFFD? * 这类点一旦让给对方，对方就拥有不可防的强制胜，因此我方必须抢先占住\uFFFD? * 选点优先“挡住后自己还能顺势反击”的位置（用己方视角\uFFFD?scoreFor 决胜）\uFFFD? * @param {number} color 对方颜色', ' * 找出“对方下一步落子即可一手形成 ≥2 个活三以上威胁（双三/三四/双四）”的空位。\n * 这类点一旦让给对方，对方就拥有不可防的强制胜，因此我方必须抢先占住。\n * 选点优先“挡住后自己还能顺势反击”的位置（用己方视角的 scoreFor 决胜）。\n * @param {number} color 对方颜色'],
+  [' * @returns {Array|null} 需要堵住的\uFFFD?[r, c]；不存在则返\uFFFD?null', ' * @returns {Array|null} 需要堵住的点 [r, c]；不存在则返回 null'],
+  ['      // countThreats 会“假装”在该点落子统计威胁数（lineInfo 不写棋盘\uFFFD?      if (countThreats(r, c, color) >= 2) {', '      // countThreats 会“假装”在该点落子统计威胁数（lineInfo 不写棋盘）\n      if (countThreats(r, c, color) >= 2) {'],
+  [' * 开局策略（AI 前若干手）：把落点限制在中心 9×9 区域\uFFFD? * 优先选“与已有己方子构成两个方向发展”的点；对方占天元时呼应天元旁星位\uFFFD? * 从得分最高的前几名里带权随机选一手，\uFFFD?AI 面对同一种开局时出棋不重样\uFFFD? * @param {string} [level] 当前难度，决定随机候选数（简单变化大、困难收敛）', ' * 开局策略（AI 前若干手）：把落点限制在中心 9×9 区域，\n * 优先选“与已有己方子构成两个方向发展”的点；对方占天元时呼应天元旁星位。\n * 从得分最高的前几名里带权随机选一手，让 AI 面对同一种开局时出棋不重样。\n * @param {string} [level] 当前难度，决定随机候选数（简单变化大、困难收敛）'],
+  ['  // 用棋盘上的棋子数判断是否仍在开局阶段（不依赖外部状态，便于测试\uFFFD?  let placed = 0;', '  // 用棋盘上的棋子数判断是否仍在开局阶段（不依赖外部状态，便于测试）\n  let placed = 0;'],
+  ['      // 双方向发展：落子后能在两个不同方向延伸已有己方子 \uFFFD?开局更灵\uFFFD?      let dirs = 0;', '      // 双方向发展：落子后能在两个不同方向延伸已有己方子 → 开局更灵活\n      let dirs = 0;'],
+  ['  candidates.sort((a, b) => b.s - a.s);             // 分数降序，供 pickVaried 取头\uFFFD?  return pickVaried(candidates, pickTopN(level, \'opening\'));', '  candidates.sort((a, b) => b.s - a.s);             // 分数降序，供 pickVaried 取头部\n  return pickVaried(candidates, pickTopN(level, \'opening\'));'],
+  [' * 开局库查询：把当前局面做 8 对称规范化后查表，命中则返回库内应答\uFFFD? * 开局库由 work/gen-opening-book.js 用引擎自身深\uFFFD?2 搜索生成，覆\uFFFD? * 盘面 0~5 子（\uFFFD?5 手）。命中时 AI 开局有章法、响应快，且同一开局\uFFFD? * 按权重随机换着下（配合 moveVariety\uFFFD?=恒取最强，>0 按权\uFFFD?5~1 随机\uFFFD? * hard 只在\uFFFD?2 名里浮动、medium \uFFFD?3 名，兼顾强度与“变幻莫测”）\uFFFD? * @param {string} level 难度档位，决定随机候选范\uFFFD? * @param {number} side 行动方颜色（BLACK/WHITE），决定查表 key 的前缀', ' * 开局库查询：把当前局面做 8 对称规范化后查表，命中则返回库内应答。\n * 开局库由 work/gen-opening-book.js 用引擎自身深度 3 搜索生成，覆盖\n * 盘面 0~8 子（前 9 手）。命中时 AI 开局有章法、响应快，且同一开局\n * 按权重随机换着下（配合 moveVariety：=0 恒取最强，>0 按权重 5~1 随机）；\n * hard 只在前 2 名里浮动、medium 前 3 名，兼顾强度与“变幻莫测”。\n * @param {string} level 难度档位，决定随机候选范围\n * @param {number} side 行动方颜色（BLACK/WHITE），决定查表 key 的前缀'],
+  ['  // 8 对称变换表（与生成器一致）：相对天元坐\uFFFD?(x,y)=(r-center, c-center)\uFFFD?  // INV 为逆变换，把库内“规范朝向”的相对坐标还原到当前棋盘的实际朝向', '  // 8 对称变换表（与生成器一致）：相对天元坐标 (x,y)=(r-center, c-center)。\n  // INV 为逆变换，把库内“规范朝向”的相对坐标还原到当前棋盘的实际朝向'],
+  ['  // 规范化：\uFFFD?8 个朝向里“字典序最小的棋子坐标串”作\uFFFD?key\uFFFD?  // 同一开局无论旋转/镜像都命中同一\uFFFD?key（生成器与这里完全一致）', '  // 规范化：从 8 个朝向里“字典序最小的棋子坐标串”作为 key。\n  // 同一开局无论旋转/镜像都命中同一个 key（生成器与这里完全一致）'],
+  ['  // 按难度限制随机候选数并带权选取（权\uFFFD?5~1 = 生成器的搜索分排序）', '  // 按难度限制随机候选数并带权选取（权重 5~1 = 生成器的搜索分排序）'],
+  ['  // 逆对称还原绝对坐标；13/15 小棋盘越界或目标已被占时返回 null，交由上层兜\uFFFD?  const [x, y] = SYM[INV[bestSym]](entries[idx][0], entries[idx][1]);', '  // 逆对称还原绝对坐标；13/15 小棋盘越界或目标已被占时返回 null，交由上层兜底\n  const [x, y] = SYM[INV[bestSym]](entries[idx][0], entries[idx][1]);'],
+  [' * 获取当前难度下的最佳落点\uFFFD? * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD\uFFFD? * @param {number} [forColor] 计算视角的颜色；缺省\uFFFD?aiColor（AI 实战决策）\uFFFD? *        教学推荐点时\uFFFD?playerColor，用“玩家视角”计算，保证建议真正利于玩家\uFFFD? * @returns {Array|null} [r, c]', ' * 获取当前难度下的最佳落点。\n * @param {string} level 难度档位（LEVEL_EASY / LEVEL_MEDIUM / LEVEL_HARD）\n * @param {number} [forColor] 计算视角的颜色；缺省用 aiColor（AI 实战决策）；\n *        教学推荐点时用 playerColor，用“玩家视角”计算，保证建议真正利于玩家。\n * @returns {Array|null} [r, c]'],
+  ['    // 简单档保持“入门”定位：不做复杂威胁分层，但最基本的“能赢就赢\uFFFD?    // 对方要赢了必须挡”不能漏，否\uFFFD?AI 会犯低级失误、体验很差\uFFFD?    const easyWin = findImmediateWin(me);', '    // 简单档保持“入门”定位：不做复杂威胁分层，但最基本的“能赢就赢、\n    // 对方要赢了必须挡”不能漏，否则 AI 会犯低级失误、体验很差。\n    const easyWin = findImmediateWin(me);'],
+  ['  // 中等/困难档：完整威胁分层（一步成\uFFFD?\uFFFD?VCF \uFFFD?双杀 \uFFFD?活四/活三攻防 \uFFFD?开局\uFFFD?\uFFFD?启发式开局 \uFFFD?搜索\uFFFD?  {', '  // 中等/困难档：完整威胁分层（一步成五 → VCF → 双杀 → 活四/活三攻防 → 开局库 → 启发式开局 → 搜索）\n  {'],
+  ['    const aiWin = findImmediateWin(me);            // 自己能一步成\uFFFD?\uFFFD?直接\uFFFD?    if (aiWin) return aiWin;', '    const aiWin = findImmediateWin(me);            // 自己能一步成五 → 直接赢\n    if (aiWin) return aiWin;'],
+  ['    const playerWin = findImmediateWin(opp);       // 对方能一步成\uFFFD?\uFFFD?必须\uFFFD?    if (playerWin) return playerWin;', '    const playerWin = findImmediateWin(opp);       // 对方能一步成五 → 必须挡\n    if (playerWin) return playerWin;'],
+  ['    // 双杀：一手形成双\uFFFD?活四等不可防威胁', '    // 双杀：一手形成双四/活四等不可防威胁'],
+  ['    // 双三/三四/双四“阵法杀招”：一手形成双威胁且对方无更快威胁 \uFFFD?主动建立必胜阵型', '    // 双三/三四/双四“阵法杀招”：一手形成双威胁且对方无更快威胁 → 主动建立必胜阵型'],
+  ['    // 对方双杀意图防守：对方下一步一手可成双\uFFFD?三四/双四 \uFFFD?抢先堵住关键\uFFFD?    const oppDt = findOpponentDoubleThreat(opp);', '    // 对方双杀意图防守：对方下一步一手可成双三/三四/双四 → 抢先堵住关键点\n    const oppDt = findOpponentDoubleThreat(opp);'],
+  ['    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端\uFFFD?    // 把“堵还是进攻”交给搜\uFFFD?评分按全局分数权衡，避免过度防\uFFFD?    const threat = resolveThreats(me, opp, false, false);', '    // 常规攻防：己方活三（进攻优先）与防守反击选点；不强制堵对方眠三开放端。\n    // 把“堵还是进攻”交给搜索/评分按全局分数权衡，避免过度防守。\n    const threat = resolveThreats(me, opp, false, false);'],
+  ['    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）\uFFFD?    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定\uFFFD?    const book = bookMove(level, me);', '    // 开局库（盘面 0~8 子）：没有即时战术时才按库内定式应手（引擎自身搜索生成，带权随机增加变化）。\n    // 放在战术层之后：更深的开局局面也可能出现活三/冲四等威胁，先保证战术正确，安静局面再走定式。\n    const book = bookMove(level, me);'],
+  ['    // 启发式开局策略\uFFFD?~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）', '    // 启发式开局策略（0~8 子兜底，开局库未覆盖时按套路布局，带随机出棋不重样）'],
+  ['  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索\uFFFD?  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展', '  // 中等档：在威胁分层（活三/冲四/双杀等）之上叠加 3 层浅搜索，\n  // 让中盘的“布阵”不再只看单步打分，而是向前多看两三手的发展'],
+  [' * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”\uFFFD? * “防守分（阻挡玩家）”与“中心偏好”选出得分最高的位置\uFFFD? */', ' * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”、\n * “防守分（阻挡玩家）”与“中心偏好”选出得分最高的位置。 */'],
+  [' * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”\uFFFD? * “防守分（阻挡对方）”与“中心偏好”选出得分最高的位置\uFFFD? * 同分/接近分时在前 topN 名里带权随机，避免同一局面永远下同一手\uFFFD? * @param {string} [level] 当前难度，决定随机候选数', ' * 单步启发式：遍历所有空位，综合“进攻分（自己成五）”、\n * “防守分（阻挡对方）”与“中心偏好”选出得分最高的位置。\n * 同分/接近分时在前 topN 名里带权随机，避免同一局面永远下同一手。\n * @param {string} [level] 当前难度，决定随机候选数'],
+  ['  const center = (boardSize - 1) / 2;           // 中心坐标随格数变\uFFFD?', '  const center = (boardSize - 1) / 2;           // 中心坐标随格数变化'],
+  ['      const attack = evaluateCell(r, c, me);    // 进攻：自己连\uFFFD?      const defend = evaluateCell(r, c, opp);   // 防守：阻挡对\uFFFD?      // 阵法加成：一手能形成双威胁（双三/三四/双四）是五子棋最强的进攻结构\uFFFD?      // 安静局面下优先布这种“杀招阵型”，而不是零散地凑单线\uFFFD?      const dtBonus = countThreats(r, c, me) >= 2 ? DOUBLE_THREAT_BONUS : 0;', '      const attack = evaluateCell(r, c, me);    // 进攻：自己连线\n      const defend = evaluateCell(r, c, opp);   // 防守：阻挡对方\n      // 阵法加成：一手能形成双威胁（双三/三四/双四）是五子棋最强的进攻结构，\n      // 安静局面下优先布这种“杀招阵型”，而不是零散地凑单线。\n      const dtBonus = countThreats(r, c, me) >= 2 ? DOUBLE_THREAT_BONUS : 0;'],
+  ['  candidates.sort((a, b) => b.s - a.s);         // 分数降序，供 pickVaried 取头\uFFFD?  return pickVaried(candidates, pickTopN(level));', '  candidates.sort((a, b) => b.s - a.s);         // 分数降序，供 pickVaried 取头部\n  return pickVaried(candidates, pickTopN(level));'],
+  ['/** 假设\uFFFD?(r, c) 放一\uFFFD?color 棋，四个方向连子得分之和（含组合加权\uFFFD?*/', '/** 假设在 (r, c) 放一颗 color 棋，四个方向连子得分之和（含组合加权） */'],
+  ['  // 近似“双\uFFFD?双四”：同一落点能同时形成两个活三级别的威胁时加权翻倍\uFFFD?  // 这是五子棋里极难防守的棋形，必须给予额外权重\uFFFD?  if (total >= LIVE_THREE_SCORE * 2) total *= 2;', '  // 近似“双三/双四”：同一落点能同时形成两个活三级别的威胁时加权翻倍。\n  // 这是五子棋里极难防守的棋形，必须给予额外权重。\n  if (total >= LIVE_THREE_SCORE * 2) total *= 2;'],
+  [' * 统计\uFFFD?(dr, dc) 方向\uFFFD?(r, c) 为中心的连子信息\uFFFD? * 关键改进：除了连子数与开放端，还计算“这条线是否还有足够空间真正连成五子”，', ' * 统计在 (dr, dc) 方向上以 (r, c) 为中心的连子信息。\n * 关键改进：除了连子数与开放端，还计算“这条线是否还有足够空间真正连成五子”，'],
+  [' * 避免 AI 去凑“两端被封死、只有四个子的空间”的死棋型\uFFFD? * @returns {{count: number, open: number, reachable: boolean}}', ' * 避免 AI 去凑“两端被封死、只有四个子的空间”的死棋型。\n * @returns {{count: number, open: number, reachable: boolean}}'],
+  [' *   reachable  是否有足够空间连成五：count + 两端连续空位\uFFFD?>= 5', ' *   reachable  是否有足够空间连成五：count + 两端连续空位数 >= 5'],
+  ['    for (; i < 5; i++) {            // 数同色连\uFFFD?      const nr = r + dr * i * dir;', '    for (; i < 5; i++) {            // 数同色连子\n      const nr = r + dr * i * dir;'],
+  ['      if (!inBoard(nr, nc)) break;  // 越界：该端封\uFFFD?      if (board[nr][nc] === color) {', '      if (!inBoard(nr, nc)) break;  // 越界：该端封死\n      if (board[nr][nc] === color) {'],
+  ['    // 连子结束后，数这一端还能连续放下几个空位（最\uFFFD?4 个）', '    // 连子结束后，数这一端还能连续放下几个空位（最多 4 个）'],
+  ['  // 可达性：连子\uFFFD?+ 两端空位数必\uFFFD?\uFFFD?5，否则永远凑不成五连\uFFFD?  // 例：B X X X _ B 的“眠三”只\uFFFD?1 个空位，3+1=4 < 5，实际是死棋型\uFFFD?  const reachable = count + totalSpace >= 5;', '  // 可达性：连子数 + 两端空位数必须 >= 5，否则永远凑不成五连。\n  // 例：B X X X _ B 的“眠三”只有 1 个空位，3+1=4 < 5，实际是死棋型。\n  const reachable = count + totalSpace >= 5;'],
+  ['/** 沿某方向的连子得分（\uFFFD?lineInfo 计算出的棋型查表得到\uFFFD?*/', '/** 沿某方向的连子得分（由 lineInfo 计算出的棋型查表得到） */'],
+  ['/* 棋型评分表（\uFFFD?连续同色子数，列=开放端\uFFFD?0/1/2）：', '/* 棋型评分表（行=连续同色子数，列=开放端数 0/1/2）：'],
+  [' * 连得越多、两端越开放，威胁越大。所有静态评估的基础分都查这一张表\uFFFD? * 后续调“棋型价值”只需改这里一处。注意：reachable=false 的“死棋型\uFFFD? * （死\uFFFD?死三等）永远凑不成五连，lineScore 直接\uFFFD?0，不查表\uFFFD? * 数值沿用旧版公式：活四(10\uFFFD? >> 冲四(1\uFFFD? > 活三(1\uFFFD? > 眠三(1\uFFFD? > 活二(1\uFFFD?\uFFFD? */', ' * 连得越多、两端越开放，威胁越大。所有静态评估的基础分都查这一张表。\n * 后续调“棋型价值”只需改这里一处。注意：reachable=false 的“死棋型”\n * （死四/死三等）永远凑不成五连，lineScore 直接记 0，不查表。\n * 数值沿用旧版公式：活四(100000) >> 冲四(10000) > 活三(10000) > 眠三(1000) > 活二(1000)。 */'],
+  ['  [1000000, 1000000, 1000000], // 5 子及以上：已成五\uFFFD?];', '  [1000000, 1000000, 1000000], // 5 子及以上：已成五连\n];'],
+  [' * 连子评分（查棋型表）：连得越多、两端越开放，威胁越大\uFFFD? * reachable=false 的死棋型（死\uFFFD?死三等）永远无法成五，直接记 0 分，', ' * 连子评分（查棋型表）：连得越多、两端越开放，威胁越大。\n * reachable=false 的死棋型（死四/死三等）永远无法成五，直接记 0 分，'],
+  [' * 避免 AI 为了凑四子而在注定被堵死的线上浪费一手\uFFFD? */', ' * 避免 AI 为了凑四子而在注定被堵死的线上浪费一手。 */'],
+  ['  if (!reachable) return 0;                                    // 空间不足，永远无法成\uFFFD?  return PATTERN_TABLE[count][open] || 0;', '  if (!reachable) return 0;                                    // 空间不足，永远无法成五\n  return PATTERN_TABLE[count][open] || 0;'],
+];
+for (const [o, n] of blocks) {
+  cur += '=====OLD-BLOCK=====\n' + o + '\n=====NEW-BLOCK=====\n' + n + '\n=====END-BLOCK=====\n';
+}
+fs.writeFileSync(p, cur, 'utf8');
+console.log('total blocks:', (cur.match(/=====OLD-BLOCK=====/g) || []).length);
