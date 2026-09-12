@@ -24,6 +24,10 @@ const ENGINE_B = path.resolve(ROOT, argVal('b', 'outputs/engine/gomoku-ai.js'));
 const GAMES = argNum('games', 20);
 const SEED = argNum('seed', 424242);
 const LEVEL = argVal('level', 'hard');
+/* 出棋随机度：默认 0（完全确定）。注意——当双方都很强时“执黑必胜”，
+ * 此时单纯看 A/B 胜率会永远 50%，无法区分强弱（因为谁执黑谁赢）。
+ * 因此引入 variety>0 让开局走法有变化，从而产生不同的对局走势与手数。 */
+const VARIETY = Number(argVal('variety', 0));
 const S = 19;
 const EMPTY = 0, BLACK = 1, WHITE = 2;
 const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
@@ -36,21 +40,21 @@ function loadEngine(file, opts) {
   vm.createContext(sandbox);
   vm.runInContext(src, sandbox, { filename: path.basename(file) });
   const api = sandbox.module.exports;
-  api.setMoveVariety(0);
+  api.setMoveVariety(opts && opts.variety != null ? opts.variety : 0);
   api.setBoardSize(S);
   /* 可选：启用候选引擎里的“滑动窗口评估”开关（若该引擎提供 setWindowEval） */
   if (opts && opts.windowEval && typeof api.setWindowEval === 'function') api.setWindowEval(true);
   return api;
 }
 
-const A = loadEngine(ENGINE_A, { windowEval: argv.includes('--awin') });
-const B = loadEngine(ENGINE_B, { windowEval: argv.includes('--bwin') });
+const A = loadEngine(ENGINE_A, { windowEval: argv.includes('--awin'), variety: VARIETY });
+const B = loadEngine(ENGINE_B, { windowEval: argv.includes('--bwin'), variety: VARIETY });
 const sameEngine = ENGINE_A === ENGINE_B && !argv.includes('--awin') && !argv.includes('--bwin');
 
 console.log('==== 引擎 A/B 对弈 ====');
 console.log('A: ' + path.relative(ROOT, ENGINE_A) + (argv.includes('--awin') ? '  [滑动窗口评估]' : '  [原评估]'));
 console.log('B: ' + path.relative(ROOT, ENGINE_B) + (argv.includes('--bwin') ? '  [滑动窗口评估]' : '  [原评估]') + (sameEngine ? '  (与 A 相同 → 自洽性检查)' : ''));
-console.log(`难度 ${LEVEL}，${GAMES} 局，交替执黑，种子 ${SEED}`);
+console.log(`难度 ${LEVEL}，${GAMES} 局，交替执黑，种子 ${SEED}，出棋随机度 ${VARIETY}`);
 
 /* 裁判棋盘（独立于两侧引擎） */
 const judge = Array.from({ length: S }, () => Array(S).fill(EMPTY));
@@ -74,6 +78,10 @@ function hasFive(r, c, color) {
 
 let aWins = 0, bWins = 0, draws = 0, dirty = 0;
 const aTimes = [], bTimes = [], gameLens = [];
+/* 关键指标：当“执黑必胜”时，胜负只反映先手优势，无法区分强弱。
+ * 因此额外统计“某一方作白时，棋局能持续多少手”——作白撑得越久说明防守越强。
+ * 记录每局的手数与该局白方是谁。 */
+const whiteSurvival = { A: [], B: [] };
 
 for (let g = 0; g < GAMES; g++) {
   resetJudge();
@@ -101,10 +109,12 @@ for (let g = 0; g < GAMES; g++) {
     if (hasFive(r, c, color)) { winner = color; break; }
   }
   gameLens.push(stones);
+  /* 本局执白者：aIsBlack 为 true 时白方是 B，反之为 A */
+  (aIsBlack ? whiteSurvival.B : whiteSurvival.A).push(stones);
   if (!winner) draws++;
   else if ((winner === BLACK) === aIsBlack) aWins++;
   else bWins++;
-  console.log(`  局${g + 1}: ${stones} 手, ${winner ? ((winner === BLACK) === aIsBlack ? 'A 胜' : 'B 胜') : '和/'}`);
+  console.log(`  局${g + 1}: ${stones} 手, ${winner ? ((winner === BLACK) === aIsBlack ? 'A 胜' : 'B 胜') : '和/'}, 白方=${aIsBlack ? 'B' : 'A'}`);
 }
 
 const sum = (a) => a.reduce((x, y) => x + y, 0);
@@ -117,12 +127,27 @@ console.log(`\n---- 结果 ----`);
 console.log(`A 胜 ${aWins} / B 胜 ${bWins} / 和 ${draws}${dirty ? ` / 异常 ${dirty}` : ''}`);
 console.log(`A 胜率 ${(aRate * 100).toFixed(1)}%  (95% CI ±${(1.96 * se * 100).toFixed(1)}%)`);
 console.log(`平均手数 ${avg(gameLens).toFixed(1)}；A 单步平均 ${avg(aTimes).toFixed(0)}ms，B 单步平均 ${avg(bTimes).toFixed(0)}ms`);
+
+/* 核心判据：作白时的平均存活手数（越大越强）。当“执黑必胜”时，胜率无区分度。 */
+const survA = whiteSurvival.A, survB = whiteSurvival.B;
+if (survA.length && survB.length) {
+  const mA = avg(survA), mB = avg(survB);
+  const sd = (arr, m) => Math.sqrt(arr.reduce((s, x) => s + (x - m) ** 2, 0) / Math.max(1, arr.length - 1));
+  const seA = sd(survA, mA) / Math.sqrt(survA.length), seB = sd(survB, mB) / Math.sqrt(survB.length);
+  const diff = mA - mB, seDiff = Math.sqrt(seA * seA + seB * seB);
+  console.log(`\n---- 作白存活手数（核心判据：执黑必胜时唯一能区分强弱的口径）----`);
+  console.log(`A 作白: ${survA.length} 局，平均 ${mA.toFixed(1)} 手  [${survA.join(',')}]`);
+  console.log(`B 作白: ${survB.length} 局，平均 ${mB.toFixed(1)} 手  [${survB.join(',')}]`);
+  console.log(`差值 A−B = ${diff.toFixed(2)} 手（标准误 ${seDiff.toFixed(2)}）`);
+  const significant = Math.abs(diff) > 1.96 * seDiff;
+  if (!significant) console.log('→ 存活手数差异不显著（视为持平）');
+  else if (diff > 0) console.log('→ A 作白撑得更久，A 的防守更强（A 更优）');
+  else console.log('→ B 作白撑得更久，B 的防守更强（B 更优）');
+}
+
 if (sameEngine) {
   console.log('（同一引擎自洽性检查：胜率偏离 50% 过多说明先手优势或流程有偏）');
 } else if (GAMES < 20) {
-  console.log('提示: 局数偏少，胜率差异需 >±20% 才可视为信号；建议 --games 40 以上。');
-} else {
-  const verdict = aRate > 0.5 + 1.96 * se ? 'A 显著更强' : aRate < 0.5 - 1.96 * se ? 'B 显著更强' : '差异不显著（视为持平）';
-  console.log('判定: ' + verdict);
+  console.log('提示: 局数偏少，建议 --games 30 以上，并配合 --variety 0.3 制造对局变化。');
 }
 process.exit(dirty ? 1 : 0);
