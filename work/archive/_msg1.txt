@@ -1,0 +1,15 @@
+feat(engine): 把 AI 引擎从 gomoku.html 抽成独立模块
+
+- 新增 outputs/engine/gomoku-ai.js（40 个函数 + 38 个常量 + 开局库，UMD：
+  浏览器挂 window.GomokuAI / Node 可直接 require），逻辑逐字取自原内联实现
+- 新增 outputs/engine/opening-book.json（860 键 / 2590 条应答，可读副本）
+- 新增 work/build-engine.js：以模块自身为输入、按段落标记重新拼装（幂等；
+  自检覆盖函数完整性/未定义调用/未定义常量/注释配平/语法校验）
+- 新增 work/_engine-template.js：模块骨架与对外接口（setBoardSize / resizeBoard /
+  setColors / setMoveVariety 与只读 getter）
+- 新增 work/_test-harness.js：测试统一入口——引擎走 require，页面侧教学函数
+  （analyzePoint / estimateWinRate 等）按函数名从 HTML 提取
+
+关键设计：setBoardSize 刻意“原地清空”棋盘数组而非替换对象。替换会让任何缓存过
+AI.board 的调用方变成持有孤儿数组（引擎读到空盘、却仍返回看似合法的点），
+这个陷阱在编写自对弈基准时真实踩到过。

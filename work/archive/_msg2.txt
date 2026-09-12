@@ -1,0 +1,16 @@
+refactor(page): gomoku.html 改为加载引擎模块，删除内联实现
+
+- 页面顶部新增 <script src="engine/gomoku-ai.js">，内联脚本首行 const AI = GomokuAI
+- 删除内联引擎（L2649~4002 的 40 个函数）与 68KB 开局库字面量
+- 常量块：只保留页面/框架常量（BOARD_SIZES / CELL_SIZE / MARGIN / AI_DELAY /
+  胜率标尺），与引擎共享的（EMPTY/BLACK/WHITE/DIRECTIONS/LEVEL_*）从 GomokuAI 取
+- 状态块：棋盘与搜索状态（board / boardSize / playerColor / aiColor / moveVariety /
+  lastVcfPath / lastVctPath / ttMap / historyTable…）改由引擎持有，页面通过 AI.* 访问
+- 只读 getter 的赋值改为 setter 调用：AI.playerColor/AI.aiColor → AI.setColors()，
+  AI.board/AI.boardSize 的写入 → AI.setBoardSize() / AI.resizeBoard()
+- 页面内所有裸引擎调用补 AI. 前缀（findImmediateWin / threatLevel / evaluateBoard…）
+- 文件体积 275KB → 141KB，行数 4689 → 2778
+
+安全网：拆分脚本先在内存完成变换，产物先写候选文件，通过结构自检
+（注释配平、内联脚本可被 Node 解析、区块顺序、无裸标识符、所引用成员在引擎中
+真实存在）后才覆盖正式文件；备份见 work/archive/gomoku.html.pre-engine-split。

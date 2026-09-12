@@ -1,0 +1,22 @@
+test: 测试改为 require 引擎，新增必杀题库、自对弈基准与页面运行时验证
+
+- ai-threat-test.js / ai-scoring-test.js：加载方式从“正则抠 HTML 函数 + new Function”
+  改为 require 引擎模块（页面侧教学函数由 work/_test-harness.js 提取），
+  断言全部保留：71 + 41 = 112 项全绿
+- perf-hard-ai.js：改为 require 引擎；结果与此前一致（平均 ~126ms，最大 ~584ms）
+- 新增 work/positions.json + positions-test.js：25 个必杀/必防题库局面
+  （一步成五、挡活三/跳三/冲四、抢双三点、四三杀、VCF 防守、先手权、开局库），
+  校验“引擎落点必须落在可接受集合内且不落在已知错误应手上”
+- 新增 work/bench.js：自对弈基准，输出先手胜率 / 平均手数 / 单步耗时分布
+  （p50/p90/p99/max），可选 --depth 输出决策层调用分布
+- 新增 work/verify-page-runtime.js：用 vm + DOM 桩真实执行拆分后的页面内联脚本，
+  覆盖 init / 落子 / AI 应手 / 悔棋 / 换格 / 五连判胜等 26 项（本机沙箱禁止命名
+  管道，无头 Chrome 起不来，故改用此方式做页面级验证）
+- 新增 work/verify-engine-parity.js：以 work/archive/gomoku.html.pre-engine-split
+  这个“拆分前冻结版本”为黄金参照，随机局面对比 300 项，确认行为完全等价
+- 新增 work/verify-browser.js：无头浏览器自检脚本（本机因沙箱限制无法运行，
+  保留以便在普通环境使用）
+
+基准给出的当前基线（19 路 / hard / moveVariety=0）：
+  先手胜率 100%（白方防不住）、平均 31 手、单步平均 ~116ms（最大 ~600ms），
+  与本次分析阶段的结论一致——印证“引擎强度瓶颈不在时间预算，而在评估与决策”。

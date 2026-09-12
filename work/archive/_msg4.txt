@@ -1,0 +1,9 @@
+chore(work): 归档一次性脚本与调试产物
+
+- 归档到 work/archive/：引擎依赖边界分析、HTML 拆分脚本、测试迁移脚本、
+  4 个分析探针、6 个调试脚本、拆分候选产物，以及各测试/性能脚本迁移前的备份
+- 保留在 work/ 的是可长期复用的工具与测试：build-engine / _engine-template /
+  _test-harness / 两个 AI 断言测试 / 必杀题库与其校验 / bench / perf / 两个验证脚本
+- gomoku.html.pre-engine-split（281628 字节）作为“拆分前黄金参照”，供
+  verify-engine-parity 长期对照使用
+- .gitignore 补充 work/_chrome-profile/（无头浏览器遗留 profile）

@@ -4,6 +4,8 @@ work/_qrdept/
 
 # ===== 运行/临时产物 =====
 *.log
+work/_chrome-profile/
+work/_html-split-candidate.html
 
 # ===== 历史遗留的一次性修复产物（已归档到 work/archive/，此处只防将来重新冒出来）=====
 _fixed.html
